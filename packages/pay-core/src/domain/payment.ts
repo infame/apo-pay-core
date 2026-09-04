@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { Money } from "./money.js";
 import { AmountExceededError, IllegalStateTransitionError } from "./errors.js";
-import type { DomainEvent } from "./events.js";
+import type { DomainEvent, DomainEventInput } from "./events.js";
 
 /**
  * Payment lifecycle (auth/capture model):
@@ -50,11 +51,7 @@ export class Payment {
   // ── Construction ────────────────────────────────────────────────────────
 
   /** Create a brand-new payment in the `created` state. */
-  static create(params: {
-    id: string;
-    amount: Money;
-    now?: Date;
-  }): Payment {
+  static create(params: { id: string; amount: Money; now?: Date }): Payment {
     if (params.amount.isNegative() || params.amount.isZero()) {
       throw new AmountExceededError("Payment amount must be positive");
     }
@@ -115,7 +112,9 @@ export class Payment {
     }
     const toCapture = amount ?? this.props.amount;
     if (toCapture.currency !== this.props.amount.currency) {
-      throw new AmountExceededError("Capture currency must match authorization");
+      throw new AmountExceededError(
+        "Capture currency must match authorization",
+      );
     }
     if (toCapture.isNegative() || toCapture.isZero()) {
       throw new AmountExceededError("Capture amount must be positive");
@@ -204,8 +203,9 @@ export class Payment {
     return this.events.splice(0, this.events.length);
   }
 
-  private record(event: DomainEvent): void {
-    this.events.push(event);
+  /** Every event gets a stable id here, at creation time — see events.ts. */
+  private record(event: DomainEventInput): void {
+    this.events.push({ ...event, id: randomUUID() });
   }
 
   // ── Guards & accessors ──────────────────────────────────────────────────
