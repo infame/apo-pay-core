@@ -1,31 +1,25 @@
 #!/usr/bin/env bash
-# PreToolUse hook on Bash. Blocks `git commit` / `git push` unless the current diff
-# matches the hash written by approve.sh. Exit 2 = block, message goes to Claude.
+# PreToolUse hook on Bash. This is an ergonomic pre-check only — it does NOT
+# gate landing on master (that's .githooks/reference-transaction, a real git
+# hook wired via `core.hooksPath`, since it's the only thing that sees the
+# actual ref update regardless of how git was invoked: directly, through a
+# wrapper script, an alias, or with --no-verify, which skips pre-commit but
+# not reference-transaction).
+#
+# All this script does is stop a command from discarding uncommitted work or
+# skipping every git hook outright, on any branch. Exit 2 = block, message
+# goes to Claude.
 set -uo pipefail
 INPUT=$(cat)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [ -z "$CMD" ] && exit 0
 
-if echo "$CMD" | grep -qE '\bgit\s+(commit|push)\b'; then
-  cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  MARK=.claude/.review-approved
-  if [ ! -f "$MARK" ]; then
-    echo "Blocked: no review approval. Run /review or complete the /feature pipeline first." >&2
-    exit 2
-  fi
-  CUR=$({ git diff HEAD; git diff --cached; git ls-files --others --exclude-standard | sort; } \
-        | sha256sum | cut -d' ' -f1)
-  if [ "$CUR" != "$(cat "$MARK")" ]; then
-    echo "Blocked: diff changed since review approval. Re-run review." >&2
-    exit 2
-  fi
-  # one-shot: consume the marker so the next commit needs a fresh review
-  rm -f "$MARK"
-fi
-
-# Never allow skipping checks
-if echo "$CMD" | grep -qE -- '--no-verify|--force|-f\s+origin|reset\s+--hard'; then
-  echo "Blocked: destructive or check-skipping git flag." >&2
+# -i for case-insensitivity: git config keys (core.hooksPath and friends)
+# are case-insensitive, so a bare literal match here is trivially evaded by
+# re-casing it.
+if echo "$CMD" | grep -qE '\bgit\b' \
+   && echo "$CMD" | grep -qiE -- '--no-verify|--force|-f\s+origin|reset\s+--hard|core\.hookspath|--git-dir|--work-tree|--exec-path|GIT_DIR=|GIT_CONFIG_KEY|GIT_CONFIG_COUNT|branch\s+-[mM]\b'; then
+  echo "Blocked: destructive, hook-skipping, or hook-disabling git flag." >&2
   exit 2
 fi
 exit 0

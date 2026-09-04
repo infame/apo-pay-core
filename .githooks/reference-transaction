@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# git hook (wired via `git config core.hooksPath .githooks` — a one-time
+# setup step per clone, see README). Fires for every ref update git makes,
+# from any source: `git commit`, cherry-pick, rebase, revert, `git branch
+# -f`, `git update-ref`, worktree operations — regardless of how the
+# underlying git invocation was wrapped (shell script, npm, an alias, a
+# `-c`/`-C` global option, even `--no-verify`, which skips pre-commit but
+# not this hook). This is the actual enforcement boundary for landing on
+# master: scripts/guard-commit.sh (a PreToolUse hook) is just a fast,
+# ergonomic pre-check for things this hook doesn't cover (destructive flags
+# that would discard uncommitted work, and options/env vars that disable
+# git hooks outright — no hook can defend against the setting that turns
+# hooks off, so that specific evasion is caught by scripts/guard-commit.sh's
+# text match instead).
+#
+# Rule: master only ever advances by exactly one commit at a time, whose
+# content exactly matches a branch approved by scripts/approve.sh <branch>
+# (after both reviewers APPROVE git diff master...<branch>).
+#
+# Scope: this and scripts/guard-commit.sh together are a guardrail against
+# the coordinating agent reflexively skipping the branch workflow — not a
+# hardened boundary against one deliberately defeating it. This file,
+# scripts/guard-commit.sh, scripts/approve.sh, and .claude/.merge-approved
+# are all plain files a Bash-capable agent could still overwrite directly;
+# raw writes to .git/refs bypass the ref-store API (and this hook) entirely.
+set -uo pipefail
+STATE="${1:-}"
+TRUNK='master' # keep in sync with scripts/approve.sh
+MARK=.claude/.merge-approved
+PENDING=.claude/.merge-approved.landing
+
+BLOCK=0
+while read -r OLD NEW REF; do
+  [ "$REF" != "refs/heads/$TRUNK" ] && continue
+
+  case "$STATE" in
+  prepared)
+    # Don't trust $OLD from stdin (some update paths, e.g. `branch -f`,
+    # report it as all-zeros) — ask git directly for the trunk's current
+    # tip, which at this point still reflects the pre-transaction value.
+    # --verify --quiet (not a bare rev-parse) so a not-yet-existing trunk
+    # comes back empty rather than as the unresolved ref name itself.
+    CUR=$(git rev-parse --verify --quiet "refs/heads/$TRUNK" 2>/dev/null || echo "")
+    [ "$NEW" = "$CUR" ] && continue # no-op (e.g. a plain `git reset`): nothing is landing
+
+    if [ ! -f "$MARK" ]; then
+      echo "Blocked: no approved landing for $TRUNK ($CUR -> $NEW). Create a branch, commit there, squash-merge after review (scripts/approve.sh <branch>), then land." >&2
+      BLOCK=1
+      break
+    fi
+    APPROVED_BRANCH=$(cut -d' ' -f1 "$MARK")
+    APPROVED_SHA=$(cut -d' ' -f2 "$MARK")
+
+    PARENTS=$(git rev-list --parents -n1 "$NEW" 2>/dev/null | wc -w | tr -d ' ')
+    if [ "$PARENTS" != "2" ]; then # <commit-sha> <parent-sha> = 2 words for a single-parent commit
+      echo "Blocked: $TRUNK must advance by exactly one single-parent commit; got $((PARENTS - 1)) parents. A real (non-squash) merge, cherry-pick, rebase, or multi-commit jump is not an alternate door onto $TRUNK." >&2
+      BLOCK=1
+      break
+    fi
+    NEW_PARENT=$(git rev-parse "${NEW}^" 2>/dev/null || echo "")
+    if [ "$NEW_PARENT" != "$CUR" ]; then
+      echo "Blocked: $TRUNK must advance from its current tip ($CUR); got a parent of ${NEW_PARENT:-none}." >&2
+      BLOCK=1
+      break
+    fi
+
+    # Compare as diffs against the current trunk tip on both sides — not
+    # raw tree equality — so a trunk that has advanced since approval (an
+    # earlier, already-landed squash-merge) doesn't false-block a
+    # legitimate one; and recomputed fresh rather than trusting a stored
+    # hash, so nothing here is itself a forgeable marker. --full-index so
+    # two different binary blobs whose *abbreviated* ids happen to share a
+    # prefix can't hash-collide into a false accept.
+    #
+    # Hash with `git hash-object`, not `sha256sum`/`shasum` — those are
+    # coreutils, not guaranteed present (this is a boilerplate meant to be
+    # copied into other repos/machines), and if the binary is simply
+    # missing, a naive `cmd | sha256sum` pipeline silently produces two
+    # empty, equal strings — fail OPEN. `git hash-object` is always
+    # present (it's git itself) and an empty diff still hashes to a real,
+    # non-empty value, so a missing/broken tool can't manufacture a match.
+    EXPECTED=$(git diff --full-index "$CUR"..."$APPROVED_SHA" -- 2>/dev/null | git hash-object --stdin)
+    ACTUAL=$(git diff --full-index "$CUR" "$NEW" -- 2>/dev/null | git hash-object --stdin)
+    if [ -z "$EXPECTED" ] || [ -z "$ACTUAL" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+      echo "Blocked: content landing on $TRUNK doesn't match '$APPROVED_BRANCH' as approved against $CUR (something was added, removed, or edited on top, or the approval is stale). Re-run review. To recover a botched squash: 'git reset' then 'git checkout -- .', then redo 'git merge --squash $APPROVED_BRANCH' cleanly." >&2
+      BLOCK=1
+      break
+    fi
+
+    # Record exactly which transition we validated, so `committed` below
+    # consumes the approval only for *this* landing — not for some later,
+    # unrelated no-op transaction on master (a plain `git reset` or
+    # `git checkout master` also reaches `committed`, and would otherwise
+    # burn a real approval for nothing).
+    echo "$NEW" > "$PENDING"
+    ;;
+  committed)
+    if [ -f "$PENDING" ] && [ "$(cat "$PENDING")" = "$NEW" ]; then
+      rm -f "$MARK" "$PENDING" # one-shot: consumed only for the exact landing just validated
+    fi
+    ;;
+  aborted)
+    rm -f "$PENDING" # nothing landed; leave the approval marker intact for a retry
+    ;;
+  esac
+done
+
+[ "$BLOCK" = "1" ] && exit 1
+exit 0

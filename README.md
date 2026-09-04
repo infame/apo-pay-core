@@ -1,16 +1,17 @@
 # claude-team boilerplate
 
-Multi-agent pipeline for Claude Code: architect → implementer → test-runner → two reviewers → loop until approved → report. Commits are physically blocked by a hook until the current diff is approved.
+Multi-agent pipeline for Claude Code: architect → implementer → test-runner → two reviewers → loop until approved → report. Work happens on branches; commits there are free. Squash-merging into `master` is physically blocked by a git hook until the branch's diff is approved — the hook sees the actual ref update, not the command text, so wrappers/aliases/`--no-verify` don't bypass it (the only bypass is explicitly disabling the git hooks themselves — that's caught separately by the text-level PreToolUse layer).
 
 ## Setup
 
 ```bash
-cp -r .claude scripts CLAUDE.md /path/to/your/repo/
+cp -r .claude .githooks scripts CLAUDE.md /path/to/your/repo/
 cat .gitignore.append >> /path/to/your/repo/.gitignore
-cd /path/to/your/repo && chmod +x scripts/*.sh
+cd /path/to/your/repo && chmod +x scripts/*.sh .githooks/*
+cd /path/to/your/repo && git config core.hooksPath .githooks
 ```
 
-Requires `jq`. Fill in the "Project conventions" section in `CLAUDE.md` — subagents read it at startup.
+Requires `jq`. `git config core.hooksPath .githooks` is a required step — without it `.githooks/reference-transaction` isn't wired up and squash-merging into `master` isn't gated by anything; run it once per clone (it isn't committed, `core.hooksPath` lives in local `.git/config`). This exact command contains the text `core.hooksPath` and so gets caught by the guard pattern in `scripts/guard-commit.sh` (it doesn't distinguish enabling hooks from disabling them) — run it from a plain terminal directly, not by asking the agent to run it as a bash command. Fill in the "Project conventions" section in `CLAUDE.md` — subagents read it at startup.
 
 If `.claude/agents/` didn't exist before the session started — restart `claude`.
 
@@ -18,7 +19,7 @@ If `.claude/agents/` didn't exist before the session started — restart `claude
 
 ```
 /feature add idempotency-key support to POST /payments
-/review                       # review of hand-made changes before committing
+/review                       # review a branch before squash-merging into master
 @architect ...                # any role can be invoked directly
 ```
 
@@ -27,7 +28,7 @@ If `.claude/agents/` didn't exist before the session started — restart `claude
 | File | Role |
 |---|---|
 | `agents/architect.md` | planning, read-only, opus, project memory |
-| `agents/implementer.md` | code + tests, inherits the session model, doesn't commit |
+| `agents/implementer.md` | code + tests, inherits the session model, commits freely on the feature branch but never touches `master` |
 | `agents/reviewer.md` | review, read-only, project memory, strict verdict format |
 | `agents/security-reviewer.md` | security review, read-only |
 | `agents/test-runner.md` | haiku, runs typecheck/lint/tests, returns only failures |
@@ -36,9 +37,10 @@ If `.claude/agents/` didn't exist before the session started — restart `claude
 | `skills/spec/SKILL.md` | `/spec H3` — hypothesis → issue with acceptance criteria and the `agent-ready` label |
 | `PRODUCT.md` | The single source of product truth for agents. Vision, metrics, roadmap, Rejected, hypothesis log |
 | `skills/feature/SKILL.md` | the pipeline itself — orchestration and iteration limits |
-| `skills/review/SKILL.md` | review without the pipeline |
-| `scripts/guard-commit.sh` | PreToolUse hook: blocks `git commit/push` without approval, blocks `--no-verify`/`--force` |
-| `scripts/approve.sh` | writes the hash of the approved diff; the hook checks it and consumes the marker on commit |
+| `skills/review/SKILL.md` | branch review without the pipeline |
+| `.githooks/reference-transaction` | a real git hook (`core.hooksPath`), not text pattern-matching: sees any update to `refs/heads/master` — a normal commit, cherry-pick, rebase, revert, `branch -f`, `update-ref`, anything. `master` may only advance by one commit whose diff against the current `master` matches, byte for byte, the approved diff of an approved branch; the marker is consumed only after the transaction genuinely succeeds |
+| `scripts/guard-commit.sh` | PreToolUse hook, light ergonomics: blocks `--no-verify`/`--force`/`reset --hard` everywhere. Doesn't gate `master` — `.githooks/reference-transaction` does that |
+| `scripts/approve.sh <branch>` | records the branch's SHA as approved in `.claude/.merge-approved`; `.githooks/reference-transaction` reads and one-shot-consumes this file |
 | `scripts/post-edit.sh` | PostToolUse: prettier + eslint on the changed file |
 | `settings.json` | hooks, allow/deny, subagent nesting depth |
 

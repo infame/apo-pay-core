@@ -23,7 +23,7 @@
       "Bash(git diff*)",
       "Bash(git status*)",
       "Bash(git log*)",
-      "Bash(./scripts/approve.sh)"
+      "Bash(./scripts/approve.sh:*)"
     ],
     "deny": [
       "Read(./.env)",

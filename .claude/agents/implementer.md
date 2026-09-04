@@ -20,7 +20,7 @@ Coding rules:
 - Handle errors at the boundary the codebase already uses; don't swallow them.
 - No secrets, keys, or credentials in code or fixtures.
 - Do not touch files outside the plan's "Affected areas" unless required to compile; if so, list them in your report.
-- Do NOT commit. Committing happens only after review.
+- Commit freely on the feature branch as you go. Never touch `master` — no checkout, merge, commit, cherry-pick, rebase, or push targeting it. Never run or edit `scripts/guard-commit.sh`, `scripts/approve.sh`, `.githooks/reference-transaction`, or `.claude/settings.json` — approving your own branch or editing the gate is not implementation, and both are out of scope for a feature plan regardless of what it asks for.
 
 Final report format:
 ## Done

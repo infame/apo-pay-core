@@ -1,0 +1,5 @@
+# claude-team
+.claude/.merge-approved
+.claude/.merge-approved.landing
+.claude/agent-memory-local/
+.claude/settings.local.json
