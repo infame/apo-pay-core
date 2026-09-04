@@ -8,7 +8,6 @@ import { Payment } from "../domain/payment.js";
 import { Money } from "../domain/money.js";
 import { InMemoryPaymentRepository } from "../adapters/memory/in-memory-payment-repository.js";
 import { InMemoryIdempotencyStore } from "../adapters/memory/in-memory-idempotency-store.js";
-import { IdempotencyConflictError } from "../ports/idempotency-store.js";
 import {
   IllegalStateTransitionError,
   PaymentNotFoundError,
@@ -61,7 +60,10 @@ describe("CancelPayment", () => {
 
   it("cancels an authorized payment and voids the hold at the provider", async () => {
     const id = await authorize(2000);
-    const res = await cancel.execute({ paymentId: id, idempotencyKey: "cancel-1" });
+    const res = await cancel.execute({
+      paymentId: id,
+      idempotencyKey: "cancel-1",
+    });
 
     expect(res.status).toBe("canceled");
     expect(provider.cancelCalls).toHaveLength(1);
@@ -70,8 +72,14 @@ describe("CancelPayment", () => {
 
   it("is idempotent: a retry with the same key does not void twice", async () => {
     const id = await authorize(2000);
-    const first = await cancel.execute({ paymentId: id, idempotencyKey: "cancel-1" });
-    const second = await cancel.execute({ paymentId: id, idempotencyKey: "cancel-1" });
+    const first = await cancel.execute({
+      paymentId: id,
+      idempotencyKey: "cancel-1",
+    });
+    const second = await cancel.execute({
+      paymentId: id,
+      idempotencyKey: "cancel-1",
+    });
 
     expect(second).toEqual(first);
     expect(provider.cancelCalls).toHaveLength(1);
@@ -87,7 +95,10 @@ describe("CancelPayment", () => {
 
   it("rejects cancelling an unknown payment", async () => {
     await expect(
-      cancel.execute({ paymentId: "missing", idempotencyKey: "cancel-missing" }),
+      cancel.execute({
+        paymentId: "missing",
+        idempotencyKey: "cancel-missing",
+      }),
     ).rejects.toBeInstanceOf(PaymentNotFoundError);
   });
 

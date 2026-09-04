@@ -7,7 +7,8 @@ machine, idempotent operations, and a provider-agnostic integration boundary.
 
 It is **not** a card processor — no PAN ever touches this service. It
 orchestrates an external PSP behind a port, with an in-memory mock for local
-runs. Full spec: [`docs/todo/01-pay-core.md`](../../docs/todo/01-pay-core.md).
+runs. Full spec is kept local-only (`docs/todo/01-pay-core.md`, not in this
+repo); the sections that matter are summarised below.
 
 ## Why this exists
 
@@ -57,9 +58,9 @@ We use `cancel`/`canceled` (as in Stripe), not the legacy "void".
   ([ADR-0003](../../docs/adr/0003-idempotency-and-outbox.md))
 - **Atomic state + events**: `PaymentRepository.save(payment, events)` persists
   the aggregate and its domain events in one transaction — the reliable-write
-  half of an outbox. Reliable *delivery* is deliberately **not** built here: it
+  half of an outbox. Reliable _delivery_ is deliberately **not** built here: it
   is owned by Inngest in `durable-ledger`, so a dispatcher here would duplicate
-  the mechanism. (See [`01-pay-core §11`](../../docs/todo/01-pay-core.md).)
+  the mechanism. (See [ADR-0003](../../docs/adr/0003-idempotency-and-outbox.md).)
 
 ## Running
 

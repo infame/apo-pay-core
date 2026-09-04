@@ -5,8 +5,8 @@ Date: 2026-07-01
 ## Status
 
 Accepted (amended 2026-07-11: HTTP framework is Hono, not Fastify — aligning
-with the constellation stack in `docs/todo/00-overview.md` §3. Paths updated for
-the monorepo layout under `packages/pay-core/`.)
+with the constellation stack in `docs/todo/00-overview.md` §3, local-only, not
+in this repo. Paths updated for the monorepo layout under `packages/pay-core/`.)
 
 ## Context
 

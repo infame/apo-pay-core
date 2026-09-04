@@ -11,3 +11,7 @@ coverage/
 .claude/.review-approved
 .claude/agent-memory-local/
 .claude/settings.local.json
+
+# local-only, not for the repo but kept on disk for agents/orchestrator to read
+.idea/
+docs/todo/

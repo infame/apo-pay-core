@@ -1,0 +1,2 @@
+- [Docs are aspirational + local-only](project-docs-aspirational.md) — docs/todo and docs/adr describe the target stack; docs/todo is gitignored but present on disk.
+- [Lint is wired, prettier is not enforced](repo-lint-not-wired.md) — eslint flat config is real now; prettier has no config/check script, so edits drag reformat churn into diffs.
