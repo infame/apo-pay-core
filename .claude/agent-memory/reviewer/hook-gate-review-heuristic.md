@@ -26,4 +26,6 @@ plain commit on master with no marker (block) · squash without approval (block)
 - If the hook process dies between `prepared` and `committed`/`aborted`, the pending file dangles; the next no-op transaction on master silently eats a fresh, unrelated approval. Fail-closed (re-approve), just silent.
 - The text layer over-blocks `-m`/`-M` renames everywhere while missing the `--move` long form; it's ergonomic-only, so this is a warning, never a blocker.
 
+**Docs mirror the hook:** README's "Known limitations" section restates, in prose, the `Scope:` block of `.githooks/reference-transaction`'s header comment (guardrail-not-boundary; ff-from-remote blocked-but-latent). When reviewing a change to either, check the other still agrees — they drift silently since nothing tests prose.
+
 See [[repo-lint-not-wired]] for the other place this repo's tooling and docs drift apart.

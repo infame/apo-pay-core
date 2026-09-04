@@ -72,6 +72,8 @@ Verdict precedence when they disagree: security-reviewer > reviewer > test-runne
 
 ## Known limitations
 
-- The hook fixes the diff by hash: any edit after approval (even formatting) requires a fresh `/review`. This is intentional.
+- Approval is pinned to the branch tip at `scripts/approve.sh <branch>` time: any content change on the branch afterwards (even a formatting fixup) invalidates it and needs a fresh `/review`. This is intentional.
+- This is a guardrail against a coordinating agent reflexively skipping the branch workflow, not a hardened boundary against one deliberately defeating it — the marker file and the gate scripts themselves are plain files a Bash-capable agent could still overwrite directly, and raw writes into `.git/refs` bypass the ref-store API (and the `reference-transaction` hook) entirely.
+- Fast-forwarding `master` from a remote is blocked, since it isn't a single approved commit. No remote is configured in this repo, so it's latent; wiring one up needs an exception for a ref already reachable from `refs/remotes/*`.
 - Subagents don't see the main session's conversation — all context has to go into the delegating message. `/feature` does this; for manual `@`-invocations, pass it yourself.
 - If the session is in `bypassPermissions` or `auto`, subagents' `permissionMode` is ignored — the hooks still run.
