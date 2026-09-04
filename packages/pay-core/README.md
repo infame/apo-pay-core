@@ -30,9 +30,10 @@ src/
   adapters/
     mock/      In-memory PSP for demos/tests (deterministic decline hook)
     memory/    In-memory repository + idempotency store (tests only)
-    persistence/drizzle/  (roadmap) Postgres repository + idempotency store
+    persistence/drizzle/  Postgres repository + idempotency store (schema, migrations, adapters)
     acquirer/  (roadmap) deterministic acquirer simulator (fail-then-succeed)
     http/      (roadmap) Hono routes, Zod schemas, error mapper
+  composition-root.ts   Wires the Postgres adapters + use-cases into `createPayCore(...)`
 ```
 
 See [ADR-0002](../../docs/adr/0002-ports-and-adapters.md).
@@ -62,6 +63,74 @@ We use `cancel`/`canceled` (as in Stripe), not the legacy "void".
   is owned by Inngest in `durable-ledger`, so a dispatcher here would duplicate
   the mechanism. (See [ADR-0003](../../docs/adr/0003-idempotency-and-outbox.md).)
 
+## Persistence & concurrency
+
+The Postgres adapters (`src/adapters/persistence/drizzle/`) implement
+`PaymentRepository` and `IdempotencyStore` against three tables (`payments`,
+`payment_events`, `idempotency_keys`) via [Drizzle](https://orm.drizzle.team/)
++ [`pg`](https://node-postgres.com/) (`node-postgres`, not `postgres.js` —
+see below). Schema: `packages/pay-core/src/adapters/persistence/drizzle/schema.ts`;
+generated migrations live in `drizzle/` and are applied by
+`src/adapters/persistence/drizzle/migrator.ts`.
+
+**Optimistic locking, not `SELECT … FOR UPDATE`.** Every mutating use-case
+calls out to the (simulated) PSP *between* reading and writing a payment. A
+row lock (`FOR UPDATE`) held across that external call would pin a pooled
+connection for as long as the provider takes to respond — under a slow or
+degraded provider, a handful of in-flight requests would exhaust the whole
+pool for every other request, including ones touching unrelated payments.
+Optimistic locking (`payments.version`, checked with `UPDATE … WHERE id = $1
+AND version = $2`) only pays a cost on genuine write-write conflicts on the
+*same* payment, which are rare, and never holds a connection during the PSP
+round-trip. A conflict surfaces as a typed `OptimisticLockError`
+(`src/adapters/persistence/drizzle/errors.ts`) — see
+`pg-payment-repository.integration.test.ts` and
+`concurrency.integration.test.ts` for the race this protects against.
+
+**Transaction boundary: `AsyncLocalStorage`, not an explicit `UnitOfWork`
+port.** `TransactionScope` (`transaction-scope.ts`) gives the composition
+root a `scope.run(() => useCase.execute(cmd))` wrapper; inside that call
+tree, `PgPaymentRepository` and `PgIdempotencyStore` both resolve the *same*
+ambient transaction via `AsyncLocalStorage`, without either of them — or the
+use-case itself — being passed a transaction handle explicitly. The
+transaction begins lazily on the first *write* (`beginIfNeeded`), so reads
+(`findById`) and the PSP call happen without a connection checked out. A
+mutable "current transaction" field on the adapter instance was rejected: the
+repository/store are singletons in the composition root, so a plain field
+would be clobbered by concurrent requests; `AsyncLocalStorage` scopes the
+handle to one call chain instead. This is also what makes the idempotency-key
+insert and the payment write atomic: when a second concurrent request loses
+the idempotency-key race (`(key, operation)` primary key violation), the
+*whole* ambient transaction — including that request's payment insert —
+rolls back, so there's no orphan row to reconcile; the composition root then
+replays the winner's already-committed response.
+
+**Local Docker Compose, not Testcontainers.** `docker-compose.yml` at the
+monorepo root runs Postgres locally (`apo` for dev, `apo_test` for
+integration tests, created by an initdb script) instead of spinning up
+ephemeral containers via Testcontainers. Simpler CI/local setup and faster
+iteration for a single-service repo; revisit if/when multiple services need
+isolated, disposable databases per test run.
+
+### Running against Postgres
+
+```bash
+docker compose up -d                              # from the monorepo root; postgres:17-alpine on :5433
+DATABASE_URL=postgres://apo:apo@localhost:5433/apo pnpm --filter @apo/pay-core db:migrate
+
+pnpm --filter @apo/pay-core test:integration       # real-Postgres suites (*.integration.test.ts)
+```
+
+`pnpm --filter @apo/pay-core test` (no flags) never touches Postgres —
+`vitest.config.ts` excludes `*.integration.test.ts` — so the default test
+run stays green without Docker. `test:integration` defaults
+`TEST_DATABASE_URL` to the `apo_test` database above if unset, and fails
+loudly (not silently skips) if Postgres isn't reachable.
+
+`DATABASE_URL` / `TEST_DATABASE_URL` are documented for a local `.env` in the
+monorepo root; values there are throwaway local-only credentials matching
+`docker-compose.yml`.
+
 ## Running
 
 ```bash
@@ -78,9 +147,9 @@ Requires Node 24+ and pnpm.
 - [x] Ports + in-memory adapters
 - [x] `CreatePayment` use-case with idempotency
 - [x] `CapturePayment` + `RefundPayment` use-cases
-- [ ] `CancelPayment` + `GetPayment` use-cases
-- [ ] Drizzle + Postgres adapters (optimistic locking, UNIQUE idempotency)
+- [x] `CancelPayment` + `GetPayment` use-cases
+- [x] Drizzle + Postgres adapters (optimistic locking, UNIQUE idempotency)
 - [ ] Acquirer simulator (deterministic fail-then-succeed; 402 vs 503)
 - [ ] Hono HTTP layer + Zod schemas + error mapper
-- [ ] Integration tests against a real Postgres
+- [x] Integration tests against a real Postgres
 - [ ] Dockerfile + CI
