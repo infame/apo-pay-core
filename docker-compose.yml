@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      # Host port 5433 — 5432 is often already taken by a local Postgres.
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: apo
+      POSTGRES_PASSWORD: apo
+      POSTGRES_DB: apo
+    volumes:
+      - apo_postgres_data:/var/lib/postgresql/data
+      # Creates a second `apo_test` database alongside the default `apo` one,
+      # so unit-DB and integration-test data never mix.
+      - ./scripts/db/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apo -d apo"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  apo_postgres_data:
