@@ -6,16 +6,16 @@
 # underlying git invocation was wrapped (shell script, npm, an alias, a
 # `-c`/`-C` global option, even `--no-verify`, which skips pre-commit but
 # not this hook). This is the actual enforcement boundary for landing on
-# master: scripts/guard-commit.sh (a PreToolUse hook) is just a fast,
+# main: scripts/guard-commit.sh (a PreToolUse hook) is just a fast,
 # ergonomic pre-check for things this hook doesn't cover (destructive flags
 # that would discard uncommitted work, and options/env vars that disable
 # git hooks outright — no hook can defend against the setting that turns
 # hooks off, so that specific evasion is caught by scripts/guard-commit.sh's
 # text match instead).
 #
-# Rule: master only ever advances by exactly one commit at a time, whose
+# Rule: main only ever advances by exactly one commit at a time, whose
 # content exactly matches a branch approved by scripts/approve.sh <branch>
-# (after both reviewers APPROVE git diff master...<branch>).
+# (after both reviewers APPROVE git diff main...<branch>).
 #
 # Scope: this and scripts/guard-commit.sh together are a guardrail against
 # the coordinating agent reflexively skipping the branch workflow — not a
@@ -25,7 +25,7 @@
 # raw writes to .git/refs bypass the ref-store API (and this hook) entirely.
 set -uo pipefail
 STATE="${1:-}"
-TRUNK='master' # keep in sync with scripts/approve.sh
+TRUNK='main' # keep in sync with scripts/approve.sh
 MARK=.claude/.merge-approved
 PENDING=.claude/.merge-approved.landing
 
@@ -89,8 +89,8 @@ while read -r OLD NEW REF; do
 
     # Record exactly which transition we validated, so `committed` below
     # consumes the approval only for *this* landing — not for some later,
-    # unrelated no-op transaction on master (a plain `git reset` or
-    # `git checkout master` also reaches `committed`, and would otherwise
+    # unrelated no-op transaction on main (a plain `git reset` or
+    # `git checkout main` also reaches `committed`, and would otherwise
     # burn a real approval for nothing).
     echo "$NEW" > "$PENDING"
     ;;

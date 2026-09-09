@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PreToolUse hook on Bash. This is an ergonomic pre-check only — it does NOT
-# gate landing on master (that's .githooks/reference-transaction, a real git
+# gate landing on main (that's .githooks/reference-transaction, a real git
 # hook wired via `core.hooksPath`, since it's the only thing that sees the
 # actual ref update regardless of how git was invoked: directly, through a
 # wrapper script, an alias, or with --no-verify, which skips pre-commit but
