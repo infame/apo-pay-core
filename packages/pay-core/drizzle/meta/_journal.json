@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1788544445257,
+      "tag": "0000_gray_serpent_society",
+      "breakpoints": true
+    }
+  ]
+}

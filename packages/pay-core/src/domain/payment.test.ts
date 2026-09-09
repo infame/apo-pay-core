@@ -14,6 +14,20 @@ describe("Payment state machine", () => {
     expect(events[0]?.type).toBe("payment.created");
   });
 
+  it("gives every event a stable, unique id at creation time", () => {
+    const p = newPayment();
+    p.authorize("ref");
+    p.capture();
+    const events = p.pullEvents();
+    expect(events).toHaveLength(3);
+    for (const event of events) {
+      expect(typeof event.id).toBe("string");
+      expect(event.id.length).toBeGreaterThan(0);
+    }
+    const ids = new Set(events.map((e) => e.id));
+    expect(ids.size).toBe(events.length);
+  });
+
   it("rejects a zero or negative amount", () => {
     expect(() => Payment.create({ id: "x", amount: usd(0) })).toThrow(
       AmountExceededError,
