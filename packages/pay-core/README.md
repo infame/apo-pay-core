@@ -1,9 +1,18 @@
 # @apo/pay-core
 
-Deterministic payment core for the
-[autonomous-payment-orchestrator](../../README.md) monorepo. Built to
-demonstrate backend correctness rather than breadth: an explicit payment state
-machine, idempotent operations, and a provider-agnostic integration boundary.
+Deterministic payment core, part of **APO** (Autonomous Payment
+Orchestrator, hence the `@apo/*` package scope) — a portfolio project built
+as a constellation of separate repos rather than one big monorepo, each
+prefixed `apo-` on GitHub so they're identifiable as related at a glance:
+this one (`apo-pay-core`), plus `apo-durable-ledger`, `apo-agent-orchestrator`,
+`apo-agent-evals`, and `apo-orchestra` (head repo — cross-repo orchestration,
+demo, deploy) as they land. This repo's own `package.json` is still named
+`autonomous-payment-orchestrator` internally (it predates the multi-repo
+split) — that's a local pnpm-workspace root name, not a link to the umbrella.
+
+Built to demonstrate backend correctness rather than breadth: an explicit
+payment state machine, idempotent operations, and a provider-agnostic
+integration boundary.
 
 It is **not** a card processor — no PAN ever touches this service. It
 orchestrates an external PSP behind a port, with an in-memory mock for local
