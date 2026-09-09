@@ -38,9 +38,10 @@ src/
   app/         Use-cases (CreatePayment, CapturePayment, RefundPayment, …)
   adapters/
     mock/      In-memory PSP for demos/tests (deterministic decline hook)
+    simulator/ Directive-driven PSP simulator (deterministic + weighted-random
+               outcomes, incl. fail-then-succeed) — see below
     memory/    In-memory repository + idempotency store (tests only)
     persistence/drizzle/  Postgres repository + idempotency store (schema, migrations, adapters)
-    acquirer/  (roadmap) deterministic acquirer simulator (fail-then-succeed)
     http/      (roadmap) Hono routes, Zod schemas, error mapper
   composition-root.ts   Wires the Postgres adapters + use-cases into `createPayCore(...)`
 ```
@@ -71,6 +72,30 @@ We use `cancel`/`canceled` (as in Stripe), not the legacy "void".
   half of an outbox. Reliable _delivery_ is deliberately **not** built here: it
   is owned by Inngest in `durable-ledger`, so a dispatcher here would duplicate
   the mechanism. (See [ADR-0003](../../docs/adr/0003-idempotency-and-outbox.md).)
+
+### Provider failures: terminal vs retryable
+
+`PaymentProvider` errors split into two typed classes, both extending the
+abstract `ProviderError` (`src/ports/payment-provider.ts`):
+
+- **`ProviderDeclinedError`** — the provider looked at the request and said
+  no (insufficient funds, fraud, expired card, …). `retryable = false`.
+  Retrying the identical request cannot change the outcome. Maps to
+  HTTP `402` in the (roadmap) HTTP layer.
+- **`ProviderUnavailableError`** — the provider couldn't answer (network
+  error, 5xx, timeout). `retryable = true`. The request may succeed if
+  retried. Maps to HTTP `503`.
+
+This split is not cosmetic: it's the contract the future `durable-ledger`
+repo's retry policy is built on — it retries `ProviderUnavailableError` and
+gives up immediately on `ProviderDeclinedError`. `SimulatorProvider`
+(`src/adapters/simulator/`) exercises both paths deterministically via a
+directive grammar embedded in the (already-opaque) `paymentMethodToken` /
+`providerRef` fields — e.g. `sim.decline.insufficient_funds`,
+`sim.fail_then_succeed.2`, `sim.timeout` — plus a weighted-random mode for
+exploratory testing. See `src/adapters/simulator/directives.ts` for the full
+grammar and `simulator-provider.test.ts` for the retryable/terminal contract
+tests.
 
 ## Persistence & concurrency
 
@@ -158,7 +183,7 @@ Requires Node 24+ and pnpm.
 - [x] `CapturePayment` + `RefundPayment` use-cases
 - [x] `CancelPayment` + `GetPayment` use-cases
 - [x] Drizzle + Postgres adapters (optimistic locking, UNIQUE idempotency)
-- [ ] Acquirer simulator (deterministic fail-then-succeed; 402 vs 503)
+- [x] Acquirer simulator (deterministic fail-then-succeed; 402 vs 503)
 - [ ] Hono HTTP layer + Zod schemas + error mapper
 - [x] Integration tests against a real Postgres
 - [ ] Dockerfile + CI

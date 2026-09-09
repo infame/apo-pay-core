@@ -1,9 +1,11 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { CreatePayment } from "./create-payment.js";
 import { MockProvider } from "../adapters/mock/mock-provider.js";
+import { SimulatorProvider } from "../adapters/simulator/simulator-provider.js";
 import { InMemoryPaymentRepository } from "../adapters/memory/in-memory-payment-repository.js";
 import { InMemoryIdempotencyStore } from "../adapters/memory/in-memory-idempotency-store.js";
 import { IdempotencyConflictError } from "../ports/idempotency-store.js";
+import { ProviderUnavailableError } from "../ports/payment-provider.js";
 
 describe("CreatePayment", () => {
   let repo: InMemoryPaymentRepository;
@@ -66,5 +68,31 @@ describe("CreatePayment", () => {
     expect(res.status).toBe("failed");
     expect(res.providerRef).toBeNull();
     expect(repo.outbox.map((e) => e.type)).toContain("payment.failed");
+  });
+
+  it("a transient provider failure persists nothing and a same-command retry then succeeds", async () => {
+    let seq = 0;
+    const simulator = new SimulatorProvider();
+    const flaky = new CreatePayment(
+      repo,
+      simulator,
+      idempotency,
+      () => new Date("2026-07-01T00:00:00Z"),
+      () => `pay_${++seq}`,
+    );
+    const flakyCommand = {
+      ...command,
+      paymentMethodToken: "sim.fail_then_succeed",
+      idempotencyKey: "key-flaky",
+    };
+
+    await expect(flaky.execute(flakyCommand)).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
+    expect(repo.outbox).toHaveLength(0);
+    expect(await idempotency.find(flakyCommand.idempotencyKey)).toBeNull();
+
+    const res = await flaky.execute(flakyCommand);
+    expect(res.status).toBe("authorized");
   });
 });

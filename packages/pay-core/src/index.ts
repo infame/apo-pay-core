@@ -27,6 +27,8 @@ export * from "./app/get-payment.js";
 export * from "./adapters/memory/in-memory-payment-repository.js";
 export * from "./adapters/memory/in-memory-idempotency-store.js";
 export * from "./adapters/mock/mock-provider.js";
+export * from "./adapters/simulator/simulator-provider.js";
+export * from "./adapters/simulator/directives.js";
 
 // Postgres composition root
 export * from "./composition-root.js";

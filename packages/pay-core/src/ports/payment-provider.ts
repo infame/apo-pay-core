@@ -46,13 +46,38 @@ export interface CancelParams {
   readonly providerRef: string;
 }
 
-/** Provider declined the operation (insufficient funds, fraud, etc.). */
-export class ProviderDeclinedError extends Error {
+/**
+ * Base for failures that cross the provider port. `retryable` is the contract
+ * with durable-ledger: it decides whether a retry of the identical request
+ * could plausibly succeed. HTTP mapping (a later step): retryable -> 503, else -> 402.
+ */
+export abstract class ProviderError extends Error {
+  abstract readonly retryable: boolean;
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+/** Provider declined the operation (insufficient funds, fraud, etc.). Terminal. */
+export class ProviderDeclinedError extends ProviderError {
+  readonly retryable = false;
   constructor(
     readonly reason: string,
     readonly declineCode?: string,
   ) {
     super(`Provider declined: ${reason}`);
-    this.name = "ProviderDeclinedError";
+  }
+}
+
+/** Provider could not answer (network, 5xx, timeout). Retry may succeed. */
+export class ProviderUnavailableError extends ProviderError {
+  readonly retryable = true;
+  constructor(
+    readonly reason: string,
+    /** Hint for the caller's backoff; maps to HTTP Retry-After in a later step. */
+    readonly retryAfterMs?: number,
+  ) {
+    super(`Provider unavailable: ${reason}`);
   }
 }
