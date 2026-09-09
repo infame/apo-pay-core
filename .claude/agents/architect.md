@@ -26,7 +26,7 @@ One paragraph.
 Types, API shapes, DB schema changes, events. Show TypeScript signatures or SQL, not prose.
 
 ## Steps
-Numbered, each independently verifiable, each ending with "verify: <command or check>".
+Numbered, each independently verifiable — but don't put a "verify" line on every step; that reads as "run the full suite N times" and it's the single biggest source of wasted implementer tokens on a monorepo. Instead: end the whole list with one "verify: <comprehensive command>" covering typecheck/lint/test/build for the affected package(s). Call out a step-level verify only for something genuinely risky to debug once later steps are stacked on top of it (a migration, a generated schema, an external-system side effect) — and make that one narrow/fast (e.g. just `tsc --noEmit` on the touched file), not a full-suite re-run.
 
 ## Risks & open questions
 Include backward-compat, data migration, race conditions, idempotency, PCI/secrets exposure where relevant.
