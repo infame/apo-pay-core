@@ -1,8 +1,7 @@
 /**
  * Public surface of `@apo/pay-core`: domain, ports, use-cases, the in-memory
- * test/demo adapters, and the Postgres composition root. HTTP and other
- * driving adapters are intentionally not re-exported here — they depend on
- * this package, not the other way around.
+ * test/demo adapters, the Postgres composition root, and the Hono HTTP
+ * adapter (`createApp`, `mapError`, the request schemas).
  */
 
 // Domain
@@ -32,3 +31,8 @@ export * from "./adapters/simulator/directives.js";
 
 // Postgres composition root
 export * from "./composition-root.js";
+
+// HTTP adapter
+export * from "./adapters/http/app.js";
+export * from "./adapters/http/error-mapper.js";
+export * from "./adapters/http/schemas.js";

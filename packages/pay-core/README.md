@@ -42,7 +42,7 @@ src/
                outcomes, incl. fail-then-succeed) — see below
     memory/    In-memory repository + idempotency store (tests only)
     persistence/drizzle/  Postgres repository + idempotency store (schema, migrations, adapters)
-    http/      (roadmap) Hono routes, Zod schemas, error mapper
+    http/      Hono routes, Zod schemas, error mapper
   composition-root.ts   Wires the Postgres adapters + use-cases into `createPayCore(...)`
 ```
 
@@ -184,6 +184,6 @@ Requires Node 24+ and pnpm.
 - [x] `CancelPayment` + `GetPayment` use-cases
 - [x] Drizzle + Postgres adapters (optimistic locking, UNIQUE idempotency)
 - [x] Acquirer simulator (deterministic fail-then-succeed; 402 vs 503)
-- [ ] Hono HTTP layer + Zod schemas + error mapper
+- [x] Hono HTTP layer + Zod schemas + error mapper
 - [x] Integration tests against a real Postgres
 - [ ] Dockerfile + CI

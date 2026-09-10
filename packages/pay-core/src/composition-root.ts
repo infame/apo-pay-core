@@ -3,6 +3,8 @@ import { TransactionScope } from "./adapters/persistence/drizzle/transaction-sco
 import { PgPaymentRepository } from "./adapters/persistence/drizzle/pg-payment-repository.js";
 import { PgIdempotencyStore } from "./adapters/persistence/drizzle/pg-idempotency-store.js";
 import { DuplicateIdempotencyKeyError } from "./adapters/persistence/drizzle/errors.js";
+import { InMemoryPaymentRepository } from "./adapters/memory/in-memory-payment-repository.js";
+import { InMemoryIdempotencyStore } from "./adapters/memory/in-memory-idempotency-store.js";
 import type { PaymentProvider } from "./ports/payment-provider.js";
 import {
   CreatePayment,
@@ -32,7 +34,7 @@ export interface CreatePayCoreOptions {
   readonly clock?: () => Date;
 }
 
-export interface PayCore {
+export interface PayCoreUseCases {
   readonly createPayment: (
     raw: CreatePaymentCommand,
   ) => Promise<CreatePaymentResult>;
@@ -46,6 +48,9 @@ export interface PayCore {
     raw: CancelPaymentCommand,
   ) => Promise<CancelPaymentResult>;
   readonly getPayment: (paymentId: string) => Promise<GetPaymentResult>;
+}
+
+export interface PayCore extends PayCoreUseCases {
   /** Closes the underlying connection pool. Call once on shutdown. */
   close: () => Promise<void>;
 }
@@ -152,5 +157,75 @@ export function createPayCore(options: CreatePayCoreOptions): PayCore {
     ),
     getPayment: (paymentId: string) => getUseCase.execute(paymentId),
     close: () => pool.end(),
+  };
+}
+
+export interface CreateInMemoryPayCoreOptions {
+  readonly provider: PaymentProvider;
+  readonly clock?: () => Date;
+}
+
+/**
+ * Builds a payment core against the in-memory adapters, for tests and local
+ * demos — no database, no `close()`. Four separate `InMemoryIdempotencyStore`
+ * instances (one per mutating use-case) mirror `PgIdempotencyStore`'s
+ * `(key, operation)` uniqueness: the Postgres store scopes a key to its
+ * operation, but `InMemoryIdempotencyStore` keys on `key` alone, so a single
+ * shared instance would make a client that reuses the same `Idempotency-Key`
+ * across two different operations (e.g. create then capture) incorrectly
+ * receive the wrong operation's cached snapshot.
+ *
+ * `withIdempotencyReplay` is Postgres-specific (it recovers from a unique-
+ * constraint race on a shared transaction) and doesn't apply here: the
+ * in-memory store is single-threaded and has no such race to replay from, so
+ * the five use-cases are wired directly against the in-memory adapters.
+ *
+ * The repository is returned on the result object so tests can assert "no
+ * second effect happened" by inspecting `repository.outbox`.
+ */
+export function createInMemoryPayCore(
+  options: CreateInMemoryPayCoreOptions,
+): PayCoreUseCases & { readonly repository: InMemoryPaymentRepository } {
+  const repo = new InMemoryPaymentRepository();
+  const clock = options.clock ?? (() => new Date());
+
+  const createStore = new InMemoryIdempotencyStore();
+  const captureStore = new InMemoryIdempotencyStore();
+  const refundStore = new InMemoryIdempotencyStore();
+  const cancelStore = new InMemoryIdempotencyStore();
+
+  const createUseCase = new CreatePayment(
+    repo,
+    options.provider,
+    createStore,
+    clock,
+  );
+  const captureUseCase = new CapturePayment(
+    repo,
+    options.provider,
+    captureStore,
+    clock,
+  );
+  const refundUseCase = new RefundPayment(
+    repo,
+    options.provider,
+    refundStore,
+    clock,
+  );
+  const cancelUseCase = new CancelPayment(
+    repo,
+    options.provider,
+    cancelStore,
+    clock,
+  );
+  const getUseCase = new GetPayment(repo);
+
+  return {
+    createPayment: (raw: CreatePaymentCommand) => createUseCase.execute(raw),
+    capturePayment: (raw: CapturePaymentCommand) => captureUseCase.execute(raw),
+    refundPayment: (raw: RefundPaymentCommand) => refundUseCase.execute(raw),
+    cancelPayment: (raw: CancelPaymentCommand) => cancelUseCase.execute(raw),
+    getPayment: (paymentId: string) => getUseCase.execute(paymentId),
+    repository: repo,
   };
 }
