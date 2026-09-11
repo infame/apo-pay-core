@@ -6,7 +6,9 @@ metadata:
 ---
 
 `docs/todo/00-overview.md` (Russian, umbrella spec for the whole
-`autonomous-payment-orchestrator` constellation) and the ADRs under `docs/adr/`
+`autonomous-payment-orchestrator` monorepo — its own §2 still describes a
+five-repo "constellation" that ADR-0004 superseded; this is one repo with a
+package per component now) and the ADRs under `docs/adr/`
 describe the **target** architecture, not what is built. Known divergences
 observed 2026-09-03: overview §4 prescribes a `<repo>/test/` directory while
 pay-core colocates `*.test.ts` next to sources in `src/`; Hono, Postgres/Drizzle,

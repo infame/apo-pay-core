@@ -1,14 +1,13 @@
 # @apo/pay-core
 
-Deterministic payment core, part of **APO** (Autonomous Payment
-Orchestrator, hence the `@apo/*` package scope) — a portfolio project built
-as a constellation of separate repos rather than one big monorepo, each
-prefixed `apo-` on GitHub so they're identifiable as related at a glance:
-this one (`apo-pay-core`), plus `apo-durable-ledger`, `apo-agent-orchestrator`,
-`apo-agent-evals`, and `apo-orchestra` (head repo — cross-repo orchestration,
-demo, deploy) as they land. This repo's own `package.json` is still named
-`autonomous-payment-orchestrator` internally (it predates the multi-repo
-split) — that's a local pnpm-workspace root name, not a link to the umbrella.
+Deterministic payment core, one package (`packages/pay-core`) in the
+**APO** (Autonomous Payment Orchestrator, hence the `@apo/*` package scope)
+monorepo — a portfolio project. `durable-ledger`, `agent-orchestrator`,
+`agent-evals`, and `orchestra` land as sibling packages in the same
+workspace as they're built, not as separate repos — see
+[ADR-0004](../../docs/adr/0004-monorepo-not-constellation.md) for why (an
+earlier plan split these into five repos; the tooling cost of that turned
+out to be real and repeated five times for no technical benefit).
 
 Built to demonstrate backend correctness rather than breadth: an explicit
 payment state machine, idempotent operations, and a provider-agnostic
@@ -87,7 +86,7 @@ abstract `ProviderError` (`src/ports/payment-provider.ts`):
   retried. Maps to HTTP `503`.
 
 This split is not cosmetic: it's the contract the future `durable-ledger`
-repo's retry policy is built on — it retries `ProviderUnavailableError` and
+package's retry policy is built on — it retries `ProviderUnavailableError` and
 gives up immediately on `ProviderDeclinedError`. `SimulatorProvider`
 (`src/adapters/simulator/`) exercises both paths deterministically via a
 directive grammar embedded in the (already-opaque) `paymentMethodToken` /
