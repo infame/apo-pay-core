@@ -1,19 +1,20 @@
 /**
- * Public surface of `@apo/durable-ledger`. Steps 1-6 of the spec's
+ * Public surface of `@apo/durable-ledger`. Steps 1-7 of the spec's
  * implementation order (docs/todo/02-durable-ledger.md §13) — the
- * double-entry ledger domain model, the Postgres schema for
- * `ledger_entries`, the `LedgerRepository` port + Postgres adapter for
- * atomic, idempotent posting, a typed `pay-core` HTTP client with
- * deterministic `Idempotency-Key` generation, a pure retry-decision policy,
- * and the `payment.execute` Inngest workflow (happy path + retries, no
- * compensations yet — see ADR-0007, ADR-0008). Sagas and the HTTP layer
- * land in later steps.
+ * double-entry ledger domain model (including `PostingGroup.reversalOf`),
+ * the Postgres schema for `ledger_entries`, the `LedgerRepository` port +
+ * Postgres adapter for atomic, idempotent posting, a typed `pay-core` HTTP
+ * client with deterministic `Idempotency-Key` generation, a pure
+ * retry-decision policy, and the `payment.execute` Inngest workflow (happy
+ * path + retries + compensations — see ADR-0007, ADR-0008, ADR-0009). The
+ * HTTP layer lands in a later step.
  *
  * Not exported: `src/adapters/http/pay-core-schemas.ts`, `error-mapper.ts`,
- * `fake-pay-core-server.ts`, and `src/workflow/fake-pay-core-client.ts` are
- * internal/test-only, matching the existing precedent of
- * `mappers.ts`/`errors.ts` under `src/adapters/persistence/drizzle/` — also
- * internal, also not exported here.
+ * `fake-pay-core-server.ts`, `src/workflow/fake-pay-core-client.ts`, and
+ * `src/workflow/fake-workflow-step.ts` are internal/test-only, matching the
+ * existing precedent of `mappers.ts`/`errors.ts` under
+ * `src/adapters/persistence/drizzle/` — also internal, also not exported
+ * here.
  */
 
 // Domain
@@ -44,4 +45,6 @@ export * from "./workflow/operation-id.js";
 export * from "./workflow/retry-policy.js";
 export * from "./workflow/events.js";
 export * from "./workflow/inngest-errors.js";
+export * from "./workflow/workflow-step.js";
+export * from "./workflow/compensation.js";
 export * from "./workflow/payment-execute.js";

@@ -1,11 +1,22 @@
-import { NonRetriableError, RetryAfterError } from "inngest";
+import {
+  NonRetriableError,
+  RetryAfterError,
+  StepError,
+  serializeError,
+} from "inngest";
 import { describe, expect, it } from "vitest";
 import {
   inngestRetriesFor,
+  permanentStepFailureMessage,
   rethrowForInngest,
+  stepFailureOf,
   WorkflowStepFailedError,
 } from "./inngest-errors.js";
-import { DEFAULT_RETRY_POLICY, resolveRetryPolicy } from "./retry-policy.js";
+import {
+  DEFAULT_RETRY_POLICY,
+  resolveRetryPolicy,
+  type RetryRefusalReason,
+} from "./retry-policy.js";
 import {
   PayCoreDeclinedError,
   PayCoreUnavailableError,
@@ -131,5 +142,107 @@ describe("inngestRetriesFor", () => {
     ).toThrow();
     // maxAttempts must be >= 1 (resolveRetryPolicy's own floor), so the only
     // reachable out-of-range case above 20 is the ceiling.
+  });
+});
+
+describe("WorkflowStepFailedError.code", () => {
+  it("equals its reason", () => {
+    const error = new WorkflowStepFailedError(
+      "capture",
+      "terminal_error",
+      new Error("boom"),
+    );
+    expect(error.code).toBe("terminal_error");
+    expect(error.code).toBe(error.reason);
+  });
+});
+
+describe("stepFailureOf", () => {
+  it("recovers (stepName, reason) from a live WorkflowStepFailedError thrown directly", () => {
+    const error = new WorkflowStepFailedError(
+      "capture",
+      "terminal_error",
+      new Error("declined"),
+    );
+    expect(stepFailureOf(error)).toEqual({
+      stepName: "capture",
+      reason: "terminal_error",
+    });
+  });
+
+  it("recovers (stepName, reason) from the NonRetriableError rethrowForInngest itself throws, whose .cause is the WorkflowStepFailedError", () => {
+    let thrown: unknown;
+    try {
+      rethrowForInngest("capture", declinedError(), 1);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(stepFailureOf(thrown)).toEqual({
+      stepName: "capture",
+      reason: "terminal_error",
+    });
+  });
+
+  it("recovers (stepName, reason) from a real Inngest StepError, whose custom fields do not survive serialization", () => {
+    const original = new WorkflowStepFailedError(
+      "capture",
+      "terminal_error",
+      new Error("declined"),
+    );
+    const nonRetriable = new NonRetriableError(
+      permanentStepFailureMessage("capture", "terminal_error"),
+      { cause: original },
+    );
+    const stepError = new StepError("capture", serializeError(nonRetriable));
+
+    // Confirms the ADR-0009 finding this parsing logic depends on: custom
+    // fields (including WorkflowStepFailedError.code) do NOT survive onto
+    // the StepError or its .cause.
+    expect(stepError.stepId).toBe("capture");
+    expect(
+      (stepError.cause as { code?: unknown } | undefined)?.code,
+    ).toBeUndefined();
+    expect((stepError as unknown as { code?: unknown }).code).toBeUndefined();
+
+    expect(stepFailureOf(stepError)).toEqual({
+      stepName: "capture",
+      reason: "terminal_error",
+    });
+  });
+
+  it("returns { stepName: undefined, reason: undefined } for a plain Error", () => {
+    expect(stepFailureOf(new Error("boom"))).toEqual({
+      stepName: undefined,
+      reason: undefined,
+    });
+  });
+
+  it("returns { stepName: undefined, reason: undefined } for non-Error values", () => {
+    expect(stepFailureOf("boom")).toEqual({
+      stepName: undefined,
+      reason: undefined,
+    });
+    expect(stepFailureOf(undefined)).toEqual({
+      stepName: undefined,
+      reason: undefined,
+    });
+    expect(stepFailureOf(null)).toEqual({
+      stepName: undefined,
+      reason: undefined,
+    });
+  });
+
+  it("round-trips every RetryRefusalReason through permanentStepFailureMessage", () => {
+    const reasons: readonly RetryRefusalReason[] = [
+      "terminal_error",
+      "attempts_exhausted",
+      "unclassified_error",
+    ];
+    for (const reason of reasons) {
+      const error = new NonRetriableError(
+        permanentStepFailureMessage("x", reason),
+      );
+      expect(stepFailureOf(error).reason).toBe(reason);
+    }
   });
 });

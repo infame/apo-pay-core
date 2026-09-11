@@ -16,15 +16,15 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 6 of 9
+## Status: step 7 of 9
 
-This package currently contains the double-entry ledger domain model, the
-Postgres schema and migration plumbing for `ledger_entries`, the
-`LedgerRepository` port + Postgres adapter (plus an in-memory adapter) for
-atomic, idempotent posting, a typed `pay-core` HTTP client with deterministic
-`Idempotency-Key` generation, a pure retry-decision policy, and the
-`payment.execute` Inngest workflow — steps 1-6 of the spec's own
-implementation order (§13):
+This package currently contains the double-entry ledger domain model
+(including the reversal factory), the Postgres schema and migration plumbing
+for `ledger_entries`, the `LedgerRepository` port + Postgres adapter (plus an
+in-memory adapter) for atomic, idempotent posting, a typed `pay-core` HTTP
+client with deterministic `Idempotency-Key` generation, a pure
+retry-decision policy, and the `payment.execute` Inngest workflow with
+compensations — steps 1-7 of the spec's own implementation order (§13):
 
 1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
@@ -40,18 +40,19 @@ implementation order (§13):
 5. **`decideRetry`/`isRetryable`** — a pure retry-decision policy over the
    error classification from step 4: retry or not, and after how long. See
    "Retrying pay-core calls" below.
-6. **`payment.execute` workflow on Inngest (this step)** — authorize ->
-   capture -> post a ledger entry, happy path + retries, no compensations
-   yet. See "Running the workflow" below.
-7. Sagas: a hand-rolled step registry + compensation unwind, plus ledger
-   reversal postings.
+6. **`payment.execute` workflow on Inngest** — authorize -> capture -> post a
+   ledger entry, happy path + retries. See "Running the workflow" below.
+7. **Compensations (this step)** — a hand-rolled decision table + unwind that
+   cancels/refunds a `pay-core` payment and reverses its ledger posting when
+   a later step fails terminally, plus `PostingGroup.reversalOf` (deferred
+   since step 1). See "Compensations (sagas)" below.
 8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
 9. Tests land alongside each step above.
 
-None of steps 7–9 exist yet in this package — no HTTP layer, no
-saga/compensation logic, no composition root/`main.ts`, so `payment.execute`
-cannot yet be driven against a live Inngest dev server end to end; it's
-fully testable in-process today (see "Running the workflow").
+Neither step 8 nor 9 exists yet in this package — no HTTP layer, no
+composition root/`main.ts`, so `payment.execute` cannot yet be driven against
+a live Inngest dev server end to end; it's fully testable in-process today
+(see "Running the workflow").
 
 ## The domain model
 
@@ -74,6 +75,24 @@ concurrency).
   concrete postings this package currently knows how to build (§3.3):
   capture debits `acquirer_clearing` and credits the merchant; refund is
   the exact reverse.
+- `PostingGroup.reversalOf({ original, operationId, now? })` (added this
+  step, deferred since step 1) — the mirror image of an *already-posted*
+  group: every debit becomes a credit and vice versa, same accounts,
+  amounts, and currency, tagged `entryType: "reversal"` with
+  `reversesOperationId` set to the original operation. Takes the STORED
+  entries (`LedgerRepository.findByOperationId`'s result), not a
+  `PostingGroup` — a `PostingGroup` can't be rehydrated from storage today,
+  and what must be mirrored is what actually landed in the journal. Flipping
+  every direction automatically preserves all of `create`'s invariants
+  (count, "at least one of each direction", balance — the swapped totals are
+  still equal since the originals were), so `reversalOf` delegates straight
+  to `create` after building the flipped entries; it separately rejects a
+  new `operationId` equal to the original's (that would collide with
+  `LedgerRepository.post`'s idempotency key) and a reversal-of-a-reversal.
+  **`reversalOf` is not `forRefund`**: `reversalOf` undoes *this package's
+  own* capture posting as part of a compensation (below); `forRefund` will
+  record a merchant-initiated refund as its own top-level operation once a
+  `payment.refund` workflow exists.
 - `balances.ts` — pure projections (`balanceOf`, `balanceSheet`,
   `residuals`, `isBalanced`, `assertZeroSum`) over any
   `Iterable<LedgerEntry>`. No port, no I/O — a later Postgres-backed step
@@ -88,9 +107,10 @@ negative balance is exactly offset by the merchant's positive one. See the
 named test in `balances.test.ts` asserting this.
 
 Every entry also carries `entryType` (`"capture" | "refund" | "reversal"`)
-and `reversesOperationId`. Both fields exist now, ahead of the reversal
-*logic* landing in step 7, so the Postgres schema in step 2 is a mechanical
-transcription of this shape rather than a migration later.
+and `reversesOperationId`. Both fields existed from step 1, ahead of the
+reversal *logic* (`reversalOf`, above) landing in this step — so the
+Postgres schema in step 2 was a mechanical transcription of this shape
+rather than a migration later.
 
 ## Posting & idempotency
 
@@ -278,9 +298,10 @@ does not rethrow the original error object to the outer handler, so
 `error instanceof PayCoreClientError` only holds true inside the callback
 (see `rethrowForInngest`'s own doc comment, and ADR-0008).
 
-This step is happy-path only, on purpose: a terminal failure or exhausted
-retries fails the Inngest function cleanly. No compensation/saga/reversal
-logic exists yet — that's step 7.
+A terminal failure or exhausted retries no longer just fails the Inngest
+function — it routes through the compensation logic described in
+"Compensations (sagas)" below, which decides whether to unwind what already
+succeeded or send the run straight to `needs_review`.
 
 **Constructing it — real deps vs in-memory/test deps.** `createPaymentExecuteFunction`
 takes `{ inngest, payCore, ledger, retry? }` as a plain object, not
@@ -366,7 +387,11 @@ authorize/capture), not a replay of the first one's stored result. This is
 a spec-mandated, accepted limitation of the current formula, not an
 oversight; closing it (e.g. seeding the key from something stable across a
 Replay, such as the triggering event's own id) is out of scope for this
-step. Separately — and this is a property of `@inngest/test`, not of
+step. **This now also covers compensating steps** (`compensate-authorize`,
+`compensate-capture`, `compensate-post-ledger`, added this step): a Replay
+that re-runs a compensation computes a new key/operationId the same way and
+would perform a genuine second cancel/refund/reversal, for the identical
+reason. Separately — and this is a property of `@inngest/test`, not of
 production Inngest — reusing the SAME `runId` across two separate
 `InngestTestEngine` instances (simulating "the same run happening twice")
 correctly produces two independent `post-ledger` invocations with a stable
@@ -375,6 +400,97 @@ correctly produces two independent `post-ledger` invocations with a stable
 calls and can mask a step's second real invocation behind a stale cached
 result. `payment-execute.test.ts`'s idempotent-re-execution test constructs
 a fresh `InngestTestEngine` per run for exactly this reason.
+
+## Compensations (sagas)
+
+`payment.execute` has no separate saga library or engine — spec §5 explicitly
+calls for a hand-rolled step registry, and this repo has already rejected
+pulling one in for the identical "second mechanism duplicating Inngest"
+reason it rejected an outbox dispatcher (ADR-0003, cited again in
+[ADR-0007](../../docs/adr/0007-inngest-owns-the-retry-loop.md)). The registry
+is a small pure decision table (`planUnwind`) plus a sequential executor
+(`runUnwind`), both in `src/workflow/compensation.ts`.
+
+**Decision table**, keyed on `WorkflowStepFailedError.reason`, not on which
+step failed:
+
+| Failing step | Reason | What already happened | Route | Compensating action(s) |
+|---|---|---|---|---|
+| `authorize` | any | nothing | rethrow verbatim | — |
+| `authorize` returns 201+`status:"failed"` | n/a | nothing | rethrow verbatim | — |
+| `capture` | `terminal_error` | authorization hold | **compensate** | `cancel-authorization` |
+| `capture` | `attempts_exhausted` | authorization hold, outcome unknown | **`needs_review`** | — |
+| `capture` | `unclassified_error` | authorization hold | **`needs_review`** | — |
+| `post-ledger` | `unclassified_error` (the only reason it can ever produce — a `LedgerError` is never a `PayCoreClientError`) | authorize + capture, no ledger row | **`needs_review`** | — |
+| any compensating step | any | partially unwound | **`needs_review`**, naming both the original step and the failed compensation | — |
+
+Three rules behind the non-obvious rows:
+
+- **`attempts_exhausted` never auto-compensates.** Exhausted retries mean
+  `pay-core` is unhealthy or unreachable — a compensating cancel/refund would
+  target the same unavailable dependency, and the true state is genuinely
+  unknown (the same "at most one recorded payment, not at most one PSP hold"
+  gap already documented under "Talking to pay-core"). A definitive
+  `terminal_error` from a *healthy* `pay-core` is the opposite: a reliable
+  "this did not happen", so unwinding is both safe and correct.
+- **`post-ledger` failing never triggers a refund.** A reversal needs the
+  original posted entries (`reversalOf`, above) — if the post itself failed,
+  `findByOperationId` returns nothing to mirror. Worse, the failing component
+  IS the ledger, so refunding here would move real money with zero record of
+  either leg. Every failure this step can actually produce today is a bug or
+  an infrastructure fault, and refunding a customer because of our own
+  bookkeeping bug is worse than escalating loudly.
+- **Refund subsumes cancel.** Once a payment is captured, only
+  `refund-capture` runs — issuing `cancelPayment` on an already-captured
+  payment is itself an illegal transition (`pay-core` would answer 422),
+  which would turn a *successful* compensation into a spurious
+  `needs_review`. When both a capture and a ledger posting exist, the order
+  is **refund, then reversal** — deliberately the opposite of "unwind in
+  strict reverse step order": never record a ledger movement for money that
+  wasn't actually returned. If the refund fails, the ledger is merely stale
+  (safe); reversing first and having the refund then fail would leave the
+  ledger actively lying.
+
+**Step naming.** Each compensating action gets its own step name
+(`compensate-authorize`/`compensate-capture`/`compensate-post-ledger`),
+deliberately distinct from the step it compensates — reusing the original
+step's `Idempotency-Key` would send a *different* request body under a
+*known* key and trip `pay-core`'s 409 idempotency-conflict detection:
+
+| Compensating step | pay-core `Idempotency-Key` | ledger `operationId` |
+|---|---|---|
+| `compensate-authorize` | `stepIdempotencyKey(runId, "compensate-authorize")` | — |
+| `compensate-capture` | `stepIdempotencyKey(runId, "compensate-capture")` | — |
+| `compensate-post-ledger` | — | `stepOperationId(runId, "compensate-post-ledger")` |
+
+**Reversal, never deletion.** `reverse-posting` calls `PostingGroup.reversalOf`
+and posts it as a brand-new operation — it never touches, deletes, or
+mutates the original entries (the schema's append-only trigger would refuse
+that anyway). Both the original capture and its reversal remain in the
+journal forever; the account balances just net back toward zero.
+
+**The `needs_review:` message prefix.** Every give-up path's `NonRetriableError`
+message starts with the literal token in `NEEDS_REVIEW_MARKER`
+(`"needs_review:"`); a successfully-compensated failure's message never
+contains it. This is a deliberate, greppable distinction for whoever reads
+Inngest's dashboard/logs today and step 8's `GET /workflows/:runId` later —
+see
+[ADR-0009](../../docs/adr/0009-compensation-routing-and-the-workflow-step-seam.md)
+for why the failure reason has to travel as a message substring at all
+rather than a structured field.
+
+**Why `runPaymentExecute`/`WorkflowStep` exist as a separate seam.**
+`@inngest/test`'s `InngestTestEngine` cannot execute any handler code after a
+step fails (two independent, verified blockers — see ADR-0009), which makes
+compensation logic untestable through it. `src/workflow/workflow-step.ts`
+declares the narrow `WorkflowStep` interface (just the one `run` method
+`payment.execute` actually uses) that Inngest's real `step` satisfies
+structurally with zero casts, and `runPaymentExecute` is the whole workflow
+body written against that interface instead of Inngest's `ctx` directly.
+`createPaymentExecuteFunction` is now a one-line adapter. Production callers
+never see this split — only `payment-execute-compensation.test.ts`
+(`FakeWorkflowStep`) and `payment-execute.test.ts` (`InngestTestEngine`, for
+the happy path and pre-effect failures) drive it differently.
 
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
@@ -433,6 +549,7 @@ the full rationale.
       the actual retry loop, see ADR-0007)
 - [x] `payment.execute` Inngest workflow (happy path + retries, no
       compensations yet — see ADR-0008)
-- [ ] Sagas + reversal postings (compensations)
+- [x] Sagas + reversal postings (compensations) — hand-rolled decision table
+      (`planUnwind`/`runUnwind`), `PostingGroup.reversalOf`
 - [ ] Hono HTTP layer
 - [ ] Dockerfile + CI

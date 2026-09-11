@@ -285,6 +285,204 @@ describe("PostingGroup.forCapture / forRefund (spec §3.3)", () => {
   });
 });
 
+describe("PostingGroup.reversalOf", () => {
+  it("mirrors a forCapture group exactly: same accounts/amounts/currency, directions flipped", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(1000, "USD"),
+    });
+    const reversal = PostingGroup.reversalOf({
+      original: original.entries,
+      operationId: opId(),
+    });
+
+    expect(reversal.entries).toHaveLength(2);
+    expect(reversal.entries[0]!.account.toString()).toBe("acquirer_clearing");
+    expect(reversal.entries[0]!.direction).toBe("credit");
+    expect(reversal.entries[0]!.amount.amount).toBe(1000);
+    expect(reversal.entries[1]!.account.toString()).toBe("merchant:42");
+    expect(reversal.entries[1]!.direction).toBe("debit");
+    expect(reversal.entries[1]!.amount.amount).toBe(1000);
+  });
+
+  it("stamps entryType: 'reversal' and reversesOperationId equal to the original's operationId on every entry", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    const reversal = PostingGroup.reversalOf({
+      original: original.entries,
+      operationId: opId(),
+    });
+
+    for (const entry of reversal.entries) {
+      expect(entry.entryType).toBe("reversal");
+      expect(entry.reversesOperationId).toBe(original.operationId);
+    }
+  });
+
+  it("stamps the new operationId and mints fresh entry ids, not reusing the original entries' ids", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    const newOperationId = opId();
+    const reversal = PostingGroup.reversalOf({
+      original: original.entries,
+      operationId: newOperationId,
+    });
+
+    expect(reversal.operationId).toBe(newOperationId);
+    for (const entry of reversal.entries) {
+      expect(entry.operationId).toBe(newOperationId);
+    }
+    const originalIds = new Set(original.entries.map((entry) => entry.id));
+    for (const entry of reversal.entries) {
+      expect(originalIds.has(entry.id)).toBe(false);
+    }
+  });
+
+  it("the reversal is itself internally balanced", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(750, "USD"),
+    });
+    const reversal = PostingGroup.reversalOf({
+      original: original.entries,
+      operationId: opId(),
+    });
+
+    expect(reversal.totalDebit().equals(reversal.totalCredit())).toBe(true);
+  });
+
+  it("honors a passed now", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    const now = new Date("2026-02-02T00:00:00.000Z");
+    const reversal = PostingGroup.reversalOf({
+      original: original.entries,
+      operationId: opId(),
+      now,
+    });
+
+    for (const entry of reversal.entries) {
+      expect(entry.createdAt).toEqual(now);
+    }
+  });
+
+  it("throws InvalidLedgerEntryError on an empty original array", () => {
+    expect(() =>
+      PostingGroup.reversalOf({ original: [], operationId: opId() }),
+    ).toThrow(InvalidLedgerEntryError);
+  });
+
+  it("throws InvalidLedgerEntryError when original entries have mixed operationIds", () => {
+    const first = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    const second = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    expect(() =>
+      PostingGroup.reversalOf({
+        original: [first.entries[0]!, second.entries[1]!],
+        operationId: opId(),
+      }),
+    ).toThrow(InvalidLedgerEntryError);
+  });
+
+  it("throws InvalidLedgerEntryError when original entries have mixed paymentIds", () => {
+    const operationId = opId();
+    const first = PostingGroup.forCapture({
+      operationId,
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    // A hand-built second entry sharing the same operationId but a
+    // different paymentId — not producible via forCapture/create together,
+    // so constructed directly via fromState to simulate a corrupt/mixed
+    // stored result.
+    const mismatched = LedgerEntry.fromState({
+      ...first.entries[1]!.toState(),
+      paymentId: "pay_2",
+    });
+    expect(() =>
+      PostingGroup.reversalOf({
+        original: [first.entries[0]!, mismatched],
+        operationId: opId(),
+      }),
+    ).toThrow(InvalidLedgerEntryError);
+  });
+
+  it("throws InvalidLedgerEntryError when params.operationId equals the original's operationId", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    expect(() =>
+      PostingGroup.reversalOf({
+        original: original.entries,
+        operationId: original.operationId,
+      }),
+    ).toThrow(InvalidLedgerEntryError);
+  });
+
+  it("throws InvalidLedgerEntryError when an original entry already has entryType: 'reversal'", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    const reversal = PostingGroup.reversalOf({
+      original: original.entries,
+      operationId: opId(),
+    });
+    expect(() =>
+      PostingGroup.reversalOf({
+        original: reversal.entries,
+        operationId: opId(),
+      }),
+    ).toThrow(InvalidLedgerEntryError);
+  });
+
+  it("throws InvalidLedgerEntryError on a non-UUID params.operationId", () => {
+    const original = PostingGroup.forCapture({
+      operationId: opId(),
+      paymentId: "pay_1",
+      merchantId: "42",
+      amount: Money.of(500, "USD"),
+    });
+    expect(() =>
+      PostingGroup.reversalOf({
+        original: original.entries,
+        operationId: "not-a-uuid",
+      }),
+    ).toThrow(InvalidLedgerEntryError);
+  });
+});
+
 describe("LedgerEntry immutability", () => {
   it("mutating the object returned by toState() does not affect the original entry", () => {
     const group = PostingGroup.forCapture({
