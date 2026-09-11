@@ -16,23 +16,25 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 3 of 9
+## Status: step 4 of 9
 
 This package currently contains the double-entry ledger domain model, the
-Postgres schema and migration plumbing for `ledger_entries`, and the
-`LedgerRepository` port + Postgres adapter for atomic, idempotent posting —
-steps 1-3 of the spec's own implementation order (§13):
+Postgres schema and migration plumbing for `ledger_entries`, the
+`LedgerRepository` port + Postgres adapter for atomic, idempotent posting,
+and a typed `pay-core` HTTP client with deterministic `Idempotency-Key`
+generation — steps 1-4 of the spec's own implementation order (§13):
 
 1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
 2. **Postgres schema (`ledger_entries`) via Drizzle** — its own `ledger`
    Postgres schema, append-only via a `BEFORE UPDATE OR DELETE` trigger.
-3. **`LedgerRepository` port + `PgLedgerRepository` (this step)** — atomic,
-   idempotent posting of a `PostingGroup`, plus the read paths
+3. **`LedgerRepository` port + `PgLedgerRepository`** — atomic, idempotent
+   posting of a `PostingGroup`, plus the read paths
    (`findByOperationId`/`findByPaymentId`/`findByAccount`/`getBalance`). See
    "Posting & idempotency" below.
-4. A typed `pay-core` HTTP client with deterministic `Idempotency-Key`
-   generation.
+4. **`HttpPayCoreClient` (this step)** — a typed HTTP client for `pay-core`'s
+   five routes, deterministic `Idempotency-Key` generation, and error
+   classification. See "Talking to pay-core" below.
 5. `isRetryable(error)` — the 503-retry / 402-terminal classification.
 6. `payment.execute` workflow on Inngest (happy path + retries, no
    compensations yet).
@@ -41,8 +43,8 @@ steps 1-3 of the spec's own implementation order (§13):
 8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
 9. Tests land alongside each step above.
 
-None of steps 4–9 exist yet in this package — no `pay-core` HTTP client, no
-Inngest, no HTTP layer, no saga/compensation logic, no composition root.
+None of steps 5–9 exist yet in this package — no retry policy, no Inngest,
+no HTTP layer, no saga/compensation logic, no composition root.
 
 ## The domain model
 
@@ -129,6 +131,58 @@ appends every entry of a `PostingGroup` atomically and idempotently on
   the same data — including the `acquirer_clearing` negative-sign
   convention (see "Sign convention" above).
 
+## Talking to pay-core
+
+`HttpPayCoreClient` (`src/adapters/http/pay-core-client.ts`) implements the
+`PayCoreClient` port (`src/ports/pay-core-client.ts`) against pay-core's five
+HTTP routes: `POST /payments`, `.../capture`, `.../refund`, `.../cancel`,
+`GET /payments/:id`. `baseUrl` is required with no default; the per-request
+timeout defaults to `DEFAULT_REQUEST_TIMEOUT_MS` (10s) and can be overridden
+globally (constructor) or per call (`RequestOptions.timeoutMs`).
+
+**Gotcha, do not "fix" this:** a `201` response from `createPayment` can
+carry `status: "failed"` in the body. pay-core's `CreatePayment` use-case
+catches a provider decline internally and persists a failed payment rather
+than raising an HTTP error — see `packages/pay-core/src/app/create-payment.ts`.
+`HttpPayCoreClient.createPayment` resolves normally in that case; it does
+not throw. The pinning test is named accordingly in
+`pay-core-client.test.ts`.
+
+Error classification (`src/ports/pay-core-errors.ts`), the caller-side
+mirror of pay-core's own "Provider failures: terminal vs retryable" split
+(`packages/pay-core/README.md`):
+
+| HTTP status | Error class | `retryable` |
+|---|---|---|
+| network failure (no response) | `PayCoreNetworkError` | true |
+| request timeout | `PayCoreTimeoutError` | true |
+| caller's own `AbortSignal` fired | `PayCoreRequestCanceledError` | false |
+| 400 | `PayCoreBadRequestError` | false |
+| 402 | `PayCoreDeclinedError` | false |
+| 404 | `PayCoreNotFoundError` | false |
+| 409 | `PayCoreIdempotencyConflictError` | false |
+| 422 | `PayCoreIllegalStateError` | false |
+| 503 | `PayCoreUnavailableError` | true |
+| any other non-2xx | `PayCoreUnexpectedResponseError` | `status >= 500 \|\| status === 429 \|\| status === 408` |
+| 2xx with a body that fails schema validation | `PayCoreMalformedResponseError` | false |
+
+`stepIdempotencyKey(runId, stepName)` (`src/workflow/idempotency-key.ts`) is
+`sha256(runId + ":" + stepName)`, hex-encoded. It's deterministic on
+purpose: an Inngest step re-run (step 6) produces the identical key, so
+pay-core replays its stored idempotency record instead of performing a
+second effect (double-charge, double-refund, …).
+
+**Exactly-once gap, out of scope for this client.** pay-core's
+`CreatePayment` calls the provider *before* persisting the payment (see
+`create-payment.ts`). If `createPayment` times out, `PayCoreTimeoutError`
+is correctly `retryable: true` in the sense that retrying with the same
+`Idempotency-Key` guarantees "at most one recorded payment" — but it does
+NOT guarantee "at most one PSP hold": the first attempt may have already
+authorized with the provider before the response was lost. Closing that gap
+(e.g. checking provider state before a second authorize) is a property of
+`pay-core` itself, not something this HTTP client can paper over, and is
+recorded here so it isn't silently assumed away.
+
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
 `src/domain/money.ts` is a deliberate copy of `pay-core`'s `Money`, not
@@ -181,7 +235,7 @@ the full rationale.
       balance/residual projections
 - [x] Postgres schema (`ledger_entries`, append-only, own `ledger` schema)
 - [x] Atomic multi-entry posting with a real DB transaction
-- [ ] `pay-core` HTTP client + deterministic `Idempotency-Key`
+- [x] `pay-core` HTTP client + deterministic `Idempotency-Key`
 - [ ] `isRetryable` retry policy
 - [ ] `payment.execute` Inngest workflow (happy path + retries)
 - [ ] Sagas + reversal postings (compensations)
