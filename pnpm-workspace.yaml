@@ -3,3 +3,7 @@ packages:
 
 allowBuilds:
   esbuild: true
+  # Transitive dep of `inngest` (via its Connect transport, which this package
+  # does not use). Its postinstall only generates optional CLI tooling, so it
+  # is deliberately NOT allowed to run.
+  protobufjs: false

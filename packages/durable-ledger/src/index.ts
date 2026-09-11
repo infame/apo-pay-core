@@ -1,17 +1,19 @@
 /**
- * Public surface of `@apo/durable-ledger`. Steps 1-4 of the spec's
+ * Public surface of `@apo/durable-ledger`. Steps 1-6 of the spec's
  * implementation order (docs/todo/02-durable-ledger.md §13) — the
  * double-entry ledger domain model, the Postgres schema for
  * `ledger_entries`, the `LedgerRepository` port + Postgres adapter for
- * atomic, idempotent posting, and a typed `pay-core` HTTP client with
- * deterministic `Idempotency-Key` generation. Use-cases and the rest of the
- * adapters (workflows, sagas, composition root) land in later steps.
+ * atomic, idempotent posting, a typed `pay-core` HTTP client with
+ * deterministic `Idempotency-Key` generation, a pure retry-decision policy,
+ * and the `payment.execute` Inngest workflow (happy path + retries, no
+ * compensations yet — see ADR-0007, ADR-0008). Sagas and the HTTP layer
+ * land in later steps.
  *
  * Not exported: `src/adapters/http/pay-core-schemas.ts`, `error-mapper.ts`,
- * and `fake-pay-core-server.ts` are internal/test-only, matching the
- * existing precedent of `mappers.ts`/`errors.ts` under
- * `src/adapters/persistence/drizzle/` — also internal, also not exported
- * here.
+ * `fake-pay-core-server.ts`, and `src/workflow/fake-pay-core-client.ts` are
+ * internal/test-only, matching the existing precedent of
+ * `mappers.ts`/`errors.ts` under `src/adapters/persistence/drizzle/` — also
+ * internal, also not exported here.
  */
 
 // Domain
@@ -33,7 +35,13 @@ export * from "./ports/pay-core-errors.js";
 export * from "./adapters/persistence/drizzle/schema.js";
 export * from "./adapters/persistence/drizzle/pg-ledger-repository.js";
 export * from "./adapters/http/pay-core-client.js";
+export * from "./adapters/inngest/client.js";
+export * from "./adapters/memory/in-memory-ledger-repository.js";
 
 // Workflow
 export * from "./workflow/idempotency-key.js";
+export * from "./workflow/operation-id.js";
 export * from "./workflow/retry-policy.js";
+export * from "./workflow/events.js";
+export * from "./workflow/inngest-errors.js";
+export * from "./workflow/payment-execute.js";

@@ -95,3 +95,35 @@ drifting independently.
   informational only (logged, not honored) rather than driving Inngest's
   wait directly — that's a step-6 integration detail to resolve against the
   real library, not a reason to reintroduce a local loop here.
+
+### Verified in step 6
+
+Confirmed directly against the installed `inngest@4.20.0` (see ADR-0008 for
+the full wiring writeup):
+
+- `NonRetriableError` and `RetryAfterError` exist under those exact names
+  and constructor signatures assumed above; no fallback to `step.sleep` +
+  manual re-invoke was needed.
+- `ctx.attempt` is **0-indexed** ("The current zero-indexed attempt number
+  for this function execution. The first attempt will be `0`...",
+  `node_modules/inngest/types.d.ts`) — every call site in
+  `src/workflow/payment-execute.ts` passes `attempt + 1` to `decideRetry`/
+  `rethrowForInngest`, which both expect a 1-based attempt number matching
+  this file's own `RetryPolicy.maxAttempts` convention (see
+  `decideRetry`'s doc comment in `retry-policy.ts`).
+- `RetryAfterError`'s `retryAfter` constructor argument accepts a plain
+  millisecond number (in addition to an `ms`-compatible string or a `Date`),
+  but internally quantizes it to **whole seconds**
+  (`Math.ceil(ms / 1000)`, `node_modules/inngest/components/RetryAfterError.js`)
+  before storing it as `.retryAfter`, a string. `decideRetry`'s own
+  sub-second-precision `delayMs` is therefore always rounded up at this
+  boundary — see the durable-ledger README's "Running the workflow" section,
+  "Known limitation: `RetryAfterError`'s whole-second quantization", for the
+  full note; this is a real, permanent property of Inngest's API, not
+  something step 6 worked around.
+- Inngest's own function-level `retries` option **defaults to 3, not 4** —
+  it must be set explicitly (`inngestRetriesFor(policy)`,
+  `src/workflow/inngest-errors.ts`, computed as `policy.maxAttempts - 1`) or
+  the two ceilings this ADR's Decision section describes ("this policy's
+  `maxAttempts` and Inngest's `retries`") silently drift apart the moment a
+  function omits the option.

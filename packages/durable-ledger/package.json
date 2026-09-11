@@ -18,10 +18,12 @@
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
+    "inngest": "^4.20.0",
     "pg": "^8.23.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@inngest/test": "^1.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.10",
