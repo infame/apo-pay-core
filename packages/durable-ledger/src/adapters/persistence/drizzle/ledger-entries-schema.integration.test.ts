@@ -11,13 +11,17 @@ import { withTestDb } from "./test-support.js";
 const hasTestDb = Boolean(process.env.TEST_DATABASE_URL);
 
 /**
- * Real-Postgres suite hitting the raw Drizzle client directly — no
- * repository/port layer exists yet (that's step 3), so rows are built
- * inline from domain objects via `.toState()`. Skipped (not silently — see
- * `test-support.ts`) unless `TEST_DATABASE_URL` is set; `pnpm test` never
- * picks this file up at all (`vitest.config.ts` excludes
- * `*.integration.test.ts`), so this guard only matters for a
- * direct/misconfigured invocation.
+ * Real-Postgres suite hitting the raw Drizzle client directly. A repository
+ * now exists (`pg-ledger-repository.ts`, covered by its own
+ * `pg-ledger-repository.integration.test.ts`), but this file deliberately
+ * keeps building rows inline from domain objects via `.toState()` and
+ * querying the schema directly — it covers raw CHECK constraints and the
+ * append-only trigger that a repository built on valid domain objects can
+ * never exercise (it never emits an UPDATE/DELETE, and never a row a CHECK
+ * would reject). Skipped (not silently — see `test-support.ts`) unless
+ * `TEST_DATABASE_URL` is set; `pnpm test` never picks this file up at all
+ * (`vitest.config.ts` excludes `*.integration.test.ts`), so this guard only
+ * matters for a direct/misconfigured invocation.
  */
 describe.skipIf(!hasTestDb)(
   "ledger.ledger_entries schema (integration)",
@@ -294,7 +298,8 @@ describe.skipIf(!hasTestDb)(
 
       it(
         "rejects re-posting the same operationId a second time (ledger_entries_operation_account_direction_uq) " +
-          "— step 3 will turn this into an 'already posted, return the existing result' idempotency fast path, not a real error",
+          "— PgLedgerRepository.post() turns this into an 'already posted, return the existing result' idempotency " +
+          "fast path, not a real error; this suite still probes the raw constraint directly, see the header comment",
         async () => {
           const operationId = randomUUID();
           const first = PostingGroup.forCapture({
