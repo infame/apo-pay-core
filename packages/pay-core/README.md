@@ -174,6 +174,50 @@ pnpm --filter @apo/pay-core typecheck
 
 Requires Node 24+ and pnpm.
 
+## Run it
+
+`docker compose up --build` (from the monorepo root) is the one-command way
+to bring the whole thing up: Postgres, boot-time migrations, and the
+`pay-core` HTTP service listening on `:3000`.
+
+| var | default | notes |
+|---|---|---|
+| `DATABASE_URL` | *(required)* | no default on purpose |
+| `PORT` | `3000` | |
+| `HOST` | `0.0.0.0` | must not be `127.0.0.1` in a container |
+| `PAYMENT_PROVIDER` | `simulator` | `simulator` \| `mock` |
+| `SIMULATOR_MODE` | `deterministic` | `deterministic` \| `random` |
+| `SIMULATOR_SEED` | — | required iff `SIMULATOR_MODE=random` |
+| `MIGRATE_ON_BOOT` | `true` | |
+| `SHUTDOWN_TIMEOUT_MS` | `10000` | |
+
+Config is parsed once at boot (`src/config.ts`); a missing/invalid variable
+fails fast with every issue listed in one message, instead of surfacing as a
+`pg` connection error minutes later.
+
+Demo sequence once the service is up (create → capture → get):
+
+```bash
+ID=$(curl -sS -X POST localhost:3000/payments \
+      -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-1' \
+      -d '{"amount":1200,"currency":"EUR","paymentMethodToken":"sim.ok"}' \
+      | tee /dev/stderr | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+
+curl -sS -X POST "localhost:3000/payments/$ID/capture" \
+      -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-2' -d '{}'
+
+curl -sS "localhost:3000/payments/$ID"
+```
+
+Two known limitations, both intentional and documented rather than
+oversights: `/healthz` is liveness-only — it doesn't ping the database, so a
+healthy process with a dead DB connection still reports `200`. Boot-time
+migrations (`MIGRATE_ON_BOOT`) are safe for a single replica only — there's
+no advisory lock around them, so running more than one container against the
+same database at boot could race; that's fine at one container, but would
+need a dedicated one-shot migrate job if this ever scales out to multiple
+replicas.
+
 ## Roadmap
 
 - [x] Domain: Money, Payment state machine, domain events
@@ -185,4 +229,5 @@ Requires Node 24+ and pnpm.
 - [x] Acquirer simulator (deterministic fail-then-succeed; 402 vs 503)
 - [x] Hono HTTP layer + Zod schemas + error mapper
 - [x] Integration tests against a real Postgres
-- [ ] Dockerfile + CI
+- [x] Dockerfile + `docker compose` runnable service
+- [ ] CI

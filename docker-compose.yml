@@ -19,5 +19,25 @@ services:
       timeout: 3s
       retries: 10
 
+  pay-core:
+    build:
+      context: .
+      dockerfile: packages/pay-core/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://apo:apo@postgres:5432/apo
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 volumes:
   apo_postgres_data:
