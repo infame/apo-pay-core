@@ -38,6 +38,25 @@ import { DEFAULT_RETRY_POLICY } from "./retry-policy.js";
  * the assertions below match on `.name` and on the `reason` string embedded
  * in `.message`/the nested `.cause.message`, rather than on `instanceof` or
  * on `.cause.reason` directly.
+ *
+ * **This also means `InngestTestEngine` cannot observe step 7's
+ * compensation path at all.** A live step failure halts the run at the
+ * point of failure — `runPaymentExecute`'s surrounding `catch` block (where
+ * `planUnwind`/`runUnwind` live) is never reached, so a test driven through
+ * this engine sees exactly the raw error `rethrowForInngest` threw, nothing
+ * more (confirmed empirically; see
+ * `docs/adr/0009-compensation-routing-and-the-workflow-step-seam.md` for the
+ * full writeup, including the second, more surprising blocker: pre-seeding
+ * a step's data via `steps: [...]` resolves as a false SUCCESS rather than
+ * failure, because `@inngest/test`'s pre-seeded `data` is a Proxy-wrapped
+ * Promise that always reports `typeof "object"`). Tests below that assert a
+ * terminal/exhausted capture failure therefore also assert the pay-core
+ * call log shows no compensating call (e.g. `cancelPayment`) — not because
+ * compensation doesn't run, but because this harness can't reach the code
+ * that would run it. The compensation path itself — exercising the real
+ * catch block — is covered by `payment-execute-compensation.test.ts`, which
+ * drives `runPaymentExecute` directly via `FakeWorkflowStep`
+ * (`./fake-workflow-step.js`) instead of `InngestTestEngine`.
  */
 
 function eventPayload(
@@ -258,6 +277,17 @@ describe("payment.execute workflow", () => {
     expect(failure?.name).toBe("NonRetriableError");
     expect(failure?.message).toContain("terminal_error");
     expect(await ledger.findByPaymentId(authResponse.id)).toHaveLength(0);
+    // `cancelPayment` is absent here NOT because compensation doesn't run —
+    // it's because `InngestTestEngine` halts the run at the first live step
+    // failure and never reaches `runPaymentExecute`'s surrounding catch
+    // block (see this file's header comment, and ADR-0009), so the
+    // compensation path step 7 adds is simply not observable through this
+    // particular harness. It IS covered, exercising the real catch block
+    // via `FakeWorkflowStep`, in `payment-execute-compensation.test.ts`.
+    expect(payCore.calls.map((c) => c.method)).toEqual([
+      "create_payment",
+      "capture_payment",
+    ]);
   });
 
   it("a 201-with-status:failed authorize response fails cleanly and never calls capture; ledger untouched", async () => {

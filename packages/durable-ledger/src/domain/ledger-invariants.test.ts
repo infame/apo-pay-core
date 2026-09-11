@@ -63,4 +63,27 @@ describe("ledger invariant: residuals are all-zero after every operation", () =>
     expect(finalResiduals.get("USD")?.isZero()).toBe(true);
     expect(finalResiduals.get("EUR")?.isZero()).toBe(true);
   });
+
+  it("a capture followed by its reversalOf nets every account back to zero, without removing the original entries", () => {
+    const operationId = randomUUID();
+    const capture = PostingGroup.forCapture({
+      operationId,
+      paymentId: "pay_reversal_check",
+      merchantId: "42",
+      amount: Money.of(2500, "USD"),
+    });
+
+    const reversal = PostingGroup.reversalOf({
+      original: capture.entries,
+      operationId: randomUUID(),
+    });
+
+    const combined = [...capture.entries, ...reversal.entries];
+
+    // Reversal, not deletion: both operations' entries are present.
+    expect(combined).toHaveLength(4);
+
+    const combinedResiduals = residuals(combined);
+    expect(combinedResiduals.get("USD")?.isZero()).toBe(true);
+  });
 });

@@ -21,6 +21,10 @@ function assertUUID(value: string, label: string): void {
   }
 }
 
+function oppositeDirection(direction: Direction): Direction {
+  return direction === "debit" ? "credit" : "debit";
+}
+
 /**
  * Fields are deliberately 1:1 with the future Postgres `ledger_entries`
  * columns (docs/todo/02-durable-ledger.md §7) so a later step's schema is a
@@ -272,6 +276,121 @@ export class PostingGroup {
           amount: params.amount,
         },
       ],
+    });
+  }
+
+  /**
+   * The mirror image of an already-posted group: flips every entry's
+   * direction (debit<->credit) while keeping its account, amount, and
+   * currency, tags the result `entryType: "reversal"`, and stamps
+   * `reversesOperationId` with the original operation's shared id. Takes the
+   * STORED entries (`LedgerRepository.findByOperationId`'s result, or
+   * `PostResult.entries`), not a `PostingGroup` — what must be mirrored is
+   * what actually landed in the journal, and a `PostingGroup` cannot be
+   * rehydrated from storage today (its constructor is private; only
+   * `create`/`forCapture`/`forRefund`/`reversalOf` can ever produce one).
+   *
+   * Why flipping preserves every one of `create`'s 7 invariants, without
+   * re-deriving them from scratch:
+   * 1. Entry count — untouched; the flip is 1:1 over `original`.
+   * 2. At least one debit and one credit — the flip is a bijection
+   *    debit<->credit, so if the original had both, the flipped set still
+   *    has both (in swapped roles).
+   * 3. Positive amounts — amounts are copied verbatim, only `direction`
+   *    changes, so positivity is untouched.
+   * 4. Single currency — same reasoning as (3): amounts (and thus
+   *    currencies) are copied verbatim, never recomputed.
+   * 5. Balanced totals — the new debit total equals the OLD credit total
+   *    and vice versa (same entries, swapped labels); since the original
+   *    was itself balanced (`oldDebitTotal === oldCreditTotal` — `create`'s
+   *    own invariant 5 already enforced this when `original` was first
+   *    posted), the swapped totals are still equal to each other.
+   * 6. No duplicate (account, direction) pair — the flip is a bijective
+   *    relabeling of `direction` per entry; two entries can only collide on
+   *    (account, direction) after flipping if they already collided on
+   *    (account, opposite direction) before, which invariant 6 already
+   *    ruled out.
+   * 7. Valid UUIDs — enforced again, independently, by `create`'s own
+   *    `assertUUID` on both `operationId` and `reversesOperationId` (the
+   *    latter passed through here as the shared original operationId).
+   *
+   * Pre-checks (each throwing `InvalidLedgerEntryError` with a specific
+   * message) catch the ways `original` could fail to actually BE "the
+   * stored result of one posted operation" before any of the above
+   * reasoning applies: fewer than two entries, entries that don't all share
+   * one operationId, entries that don't all share one paymentId, and — no
+   * reversal of a reversal — an entry whose own `entryType` is already
+   * `"reversal"`.
+   *
+   * `params.operationId` (a NEW id, minted by the caller — same contract as
+   * `create`'s own `operationId`) must differ from the original operation's
+   * id: reversing under the ORIGINAL operationId would collide with
+   * `LedgerRepository.post`'s idempotency-key semantics (`post` treats a
+   * repeat `operationId` as "the same logical operation, retried",
+   * comparing fingerprints) and surface as a confusing `PostingConflictError`
+   * — a different-shaped posting under a key `post` has already seen —
+   * instead of a clear, specific domain-level rejection. Catching it here,
+   * at construction time, gives a far better error message than letting it
+   * blow up two layers away inside `post()`.
+   */
+  static reversalOf(params: {
+    readonly original: readonly LedgerEntry[];
+    readonly operationId: string;
+    readonly now?: Date;
+  }): PostingGroup {
+    const { original, operationId, now } = params;
+
+    if (original.length < 2) {
+      throw new InvalidLedgerEntryError(
+        `reversalOf requires at least two original entries, got ${String(original.length)}`,
+      );
+    }
+
+    const sharedOperationId = original[0]!.operationId;
+    for (const entry of original) {
+      if (entry.operationId !== sharedOperationId) {
+        throw new InvalidLedgerEntryError(
+          `reversalOf requires every original entry to share one operationId, got both ${sharedOperationId} and ${entry.operationId}`,
+        );
+      }
+    }
+
+    const sharedPaymentId = original[0]!.paymentId;
+    for (const entry of original) {
+      if (entry.paymentId !== sharedPaymentId) {
+        throw new InvalidLedgerEntryError(
+          `reversalOf requires every original entry to share one paymentId, got both ${sharedPaymentId} and ${entry.paymentId}`,
+        );
+      }
+    }
+
+    if (operationId === sharedOperationId) {
+      throw new InvalidLedgerEntryError(
+        `reversalOf's operationId (${operationId}) must differ from the original operation's id (${sharedOperationId}) — reversing under the same id would collide with LedgerRepository.post's idempotency semantics`,
+      );
+    }
+
+    for (const entry of original) {
+      if (entry.entryType === "reversal") {
+        throw new InvalidLedgerEntryError(
+          `reversalOf cannot reverse an entry that is itself a reversal (entry ${entry.id})`,
+        );
+      }
+    }
+
+    const entries: EntryDraft[] = original.map((entry) => ({
+      account: entry.account,
+      direction: oppositeDirection(entry.direction),
+      amount: entry.amount,
+    }));
+
+    return PostingGroup.create({
+      operationId,
+      paymentId: sharedPaymentId,
+      entryType: "reversal",
+      reversesOperationId: sharedOperationId,
+      entries,
+      ...(now !== undefined ? { now } : {}),
     });
   }
 

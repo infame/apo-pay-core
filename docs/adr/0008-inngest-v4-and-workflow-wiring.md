@@ -112,3 +112,13 @@ failure — retryable or not — would silently misclassify as
   `inngest@4.20.0`/`@inngest/test@1.0.0` `.d.ts`/`.js` sources directly, not
   against public documentation, which can drift from a specific pinned
   version.
+
+**Extended in step 7**
+([ADR-0009](0009-compensation-routing-and-the-workflow-step-seam.md)): the
+error-serialization boundary described above turned out to strip more than
+this ADR's own verification caught — a `StepError`'s `.cause` loses custom
+fields entirely, including `code`, via a non-passthrough nested-cause Zod
+schema. ADR-0009 also introduces the `WorkflowStep` seam
+(`src/workflow/workflow-step.ts`) that replaces `payment.execute`'s direct
+dependence on Inngest's own `ctx.step`, for testability reasons specific to
+compensation logic.

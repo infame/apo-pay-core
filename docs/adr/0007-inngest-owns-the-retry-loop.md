@@ -127,3 +127,13 @@ the full wiring writeup):
   the two ceilings this ADR's Decision section describes ("this policy's
   `maxAttempts` and Inngest's `retries`") silently drift apart the moment a
   function omits the option.
+
+**Verified in step 7** (compensation routing, see
+[ADR-0009](0009-compensation-routing-and-the-workflow-step-seam.md)): a
+step's `attempts_exhausted` refusal — this ADR's "give up" outcome — is
+distinct from a `terminal_error` refusal at the routing layer step 7 adds:
+the former sends a run to `needs_review` without attempting compensation
+(the true effect-state is unknown), the latter compensates whatever already
+succeeded. Both still flow through the same `decideRetry`/`rethrowForInngest`
+mechanism this ADR describes; step 7 only changes what happens to the
+`NonRetriableError` once it's thrown.
