@@ -16,18 +16,21 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 2 of 9
+## Status: step 3 of 9
 
-This package currently contains the double-entry ledger domain model plus
-the Postgres schema and migration plumbing for `ledger_entries` — steps 1-2
-of the spec's own implementation order (§13):
+This package currently contains the double-entry ledger domain model, the
+Postgres schema and migration plumbing for `ledger_entries`, and the
+`LedgerRepository` port + Postgres adapter for atomic, idempotent posting —
+steps 1-3 of the spec's own implementation order (§13):
 
 1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
-2. **Postgres schema (`ledger_entries`) via Drizzle (this step)** — its own
-   `ledger` Postgres schema, append-only via a `BEFORE UPDATE OR DELETE`
-   trigger. No repository/port implementation yet — that's step 3.
-3. `posting.ts` — atomic, transactional posting of a group of entries.
+2. **Postgres schema (`ledger_entries`) via Drizzle** — its own `ledger`
+   Postgres schema, append-only via a `BEFORE UPDATE OR DELETE` trigger.
+3. **`LedgerRepository` port + `PgLedgerRepository` (this step)** — atomic,
+   idempotent posting of a `PostingGroup`, plus the read paths
+   (`findByOperationId`/`findByPaymentId`/`findByAccount`/`getBalance`). See
+   "Posting & idempotency" below.
 4. A typed `pay-core` HTTP client with deterministic `Idempotency-Key`
    generation.
 5. `isRetryable(error)` — the 503-retry / 402-terminal classification.
@@ -38,8 +41,8 @@ of the spec's own implementation order (§13):
 8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
 9. Tests land alongside each step above.
 
-None of steps 3–9 exist yet in this package — no repository/port
-implementation, no Inngest, no HTTP, no saga/compensation logic.
+None of steps 4–9 exist yet in this package — no `pay-core` HTTP client, no
+Inngest, no HTTP layer, no saga/compensation logic, no composition root.
 
 ## The domain model
 
@@ -79,6 +82,52 @@ Every entry also carries `entryType` (`"capture" | "refund" | "reversal"`)
 and `reversesOperationId`. Both fields exist now, ahead of the reversal
 *logic* landing in step 7, so the Postgres schema in step 2 is a mechanical
 transcription of this shape rather than a migration later.
+
+## Posting & idempotency
+
+`LedgerRepository.post(group)` (`src/ports/ledger-repository.ts`,
+`PgLedgerRepository` in `src/adapters/persistence/drizzle/pg-ledger-repository.ts`)
+appends every entry of a `PostingGroup` atomically and idempotently on
+`operationId`.
+
+- **Why a Postgres advisory lock, not just "insert and catch the unique
+  violation".** The schema's `(operation_id, account, direction)` unique
+  index (`schema.ts`) only stops a second insert that collides on all three
+  columns. Two concurrent `post()` calls for the same `operationId` but
+  *disjoint* accounts — one posting to `merchant:a`, a conflicting one to
+  `merchant:b` — share no row the index could collide on, so relying on the
+  index alone would let both inserts succeed and leave two different
+  postings under one `operationId`. `post()` instead takes a
+  session-scoped `pg_advisory_xact_lock(namespace, hashtext(operationId))`
+  before it reads or writes anything for that operation, inside the same
+  transaction as the read-then-insert — so the second caller for a given
+  `operationId` always sees the first caller's committed rows before
+  deciding whether to no-op or insert. The unique index stays as a backstop
+  (`DuplicatePostingError` in `errors.ts`) for the case that lock
+  serialization is itself broken, not as the primary mechanism.
+- **Why the fingerprint excludes `id`/`createdAt`.** `PostingGroup.create`
+  mints a fresh `randomUUID()` per entry on every call
+  (`src/domain/entry.ts`), so a retried workflow step legitimately
+  reconstructs "the same" logical group with different row ids and a
+  different timestamp. `fingerprintOf` (`src/domain/posting-fingerprint.ts`)
+  builds its identity from the fields that make a posting *logically* the
+  same — account, direction, amount, currency, paymentId, entryType,
+  reversesOperationId — sorted so entry order doesn't matter either.
+  `post()` compares the attempted group's fingerprint against the stored
+  entries' fingerprint: equal means "this is the same retry, return the
+  stored result"; different means `PostingConflictError` — the caller's key
+  logic changed under a stable `operationId`, which is a bug, not a retry.
+- **`getBalance` vs `balanceOf`.** `balances.ts`'s `balanceOf` is the pure
+  specification of what a balance *means* (`SUM(credit) − SUM(debit)` over
+  an `Iterable<LedgerEntry>`, no I/O). `PgLedgerRepository.getBalance` is
+  the pushed-down implementation of the same computation as a SQL
+  `SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END)`
+  aggregate, so a balance query doesn't have to pull every row for an
+  account into the application just to sum them. The two are pinned
+  together by integration tests asserting
+  `getBalance(a, c)` equals `balanceOf(await findByAccount(a, c), a, c)` on
+  the same data — including the `acquirer_clearing` negative-sign
+  convention (see "Sign convention" above).
 
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
@@ -131,7 +180,7 @@ the full rationale.
 - [x] Domain: `Money`, `LedgerAccount`, `LedgerEntry`, `PostingGroup`,
       balance/residual projections
 - [x] Postgres schema (`ledger_entries`, append-only, own `ledger` schema)
-- [ ] Atomic multi-entry posting with a real DB transaction
+- [x] Atomic multi-entry posting with a real DB transaction
 - [ ] `pay-core` HTTP client + deterministic `Idempotency-Key`
 - [ ] `isRetryable` retry policy
 - [ ] `payment.execute` Inngest workflow (happy path + retries)
