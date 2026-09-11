@@ -16,14 +16,15 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 5 of 9
+## Status: step 6 of 9
 
 This package currently contains the double-entry ledger domain model, the
 Postgres schema and migration plumbing for `ledger_entries`, the
-`LedgerRepository` port + Postgres adapter for atomic, idempotent posting, a
-typed `pay-core` HTTP client with deterministic `Idempotency-Key` generation,
-and a pure retry-decision policy — steps 1-5 of the spec's own implementation
-order (§13):
+`LedgerRepository` port + Postgres adapter (plus an in-memory adapter) for
+atomic, idempotent posting, a typed `pay-core` HTTP client with deterministic
+`Idempotency-Key` generation, a pure retry-decision policy, and the
+`payment.execute` Inngest workflow — steps 1-6 of the spec's own
+implementation order (§13):
 
 1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
@@ -36,18 +37,21 @@ order (§13):
 4. **`HttpPayCoreClient`** — a typed HTTP client for `pay-core`'s five
    routes, deterministic `Idempotency-Key` generation, and error
    classification. See "Talking to pay-core" below.
-5. **`decideRetry`/`isRetryable` (this step)** — a pure retry-decision policy
-   over the error classification from step 4: retry or not, and after how
-   long. See "Retrying pay-core calls" below.
-6. `payment.execute` workflow on Inngest (happy path + retries, no
-   compensations yet).
+5. **`decideRetry`/`isRetryable`** — a pure retry-decision policy over the
+   error classification from step 4: retry or not, and after how long. See
+   "Retrying pay-core calls" below.
+6. **`payment.execute` workflow on Inngest (this step)** — authorize ->
+   capture -> post a ledger entry, happy path + retries, no compensations
+   yet. See "Running the workflow" below.
 7. Sagas: a hand-rolled step registry + compensation unwind, plus ledger
    reversal postings.
 8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
 9. Tests land alongside each step above.
 
-None of steps 6–9 exist yet in this package — no Inngest, no HTTP layer, no
-saga/compensation logic, no composition root.
+None of steps 7–9 exist yet in this package — no HTTP layer, no
+saga/compensation logic, no composition root/`main.ts`, so `payment.execute`
+cannot yet be driven against a live Inngest dev server end to end; it's
+fully testable in-process today (see "Running the workflow").
 
 ## The domain model
 
@@ -232,20 +236,145 @@ actually throw is already funneled through `payCoreErrorFor` into a
 won't un-happen on a retry.
 
 **Inngest owns the retry loop here — do not add a `withRetry` helper.** This
-package deliberately ships no attempt loop. Step 6's Inngest workflow calls
-`decideRetry` inside a `step.run(...)`, and Inngest's own step-retry
+package deliberately ships no attempt loop. The `payment.execute` workflow
+calls `decideRetry` inside a `step.run(...)`, and Inngest's own step-retry
 mechanism (durable across a process crash, unlike an in-process
 `setTimeout`) does the actual waiting and re-invoking — rethrow the server's
 hint as Inngest's own retry-delay signal on `shouldRetry: true`, and a
 non-retriable signal otherwise, routing `terminal_error`/`unclassified_error`
 to compensation and `attempts_exhausted` to `needs_review` (see
 [ADR-0007](../../docs/adr/0007-inngest-owns-the-retry-loop.md) for the full
-reasoning, including the retry-amplification math a nested loop would cause).
-Step 6 should configure Inngest's own `retries` option as
-`DEFAULT_RETRY_POLICY.maxAttempts - 1` so the two ceilings stay pinned
-together — **unverified against an actual installed `inngest` version**; step
-6 must confirm the real API (e.g. whether `NonRetriableError`/
-`RetryAfterError` exist under those names/signatures) before relying on this.
+reasoning, including the retry-amplification math a nested loop would cause,
+and its "Verified in step 6" note for what's now confirmed against
+`inngest@4.20.0`). The workflow configures Inngest's own `retries` option as
+`DEFAULT_RETRY_POLICY.maxAttempts - 1` (`inngestRetriesFor`,
+`src/workflow/inngest-errors.ts`) so the two ceilings stay pinned together.
+
+## Running the workflow
+
+`createPaymentExecuteFunction(deps)` (`src/workflow/payment-execute.ts`)
+builds the `payment.execute` Inngest function: given a
+`payment/execute.requested` event (`src/workflow/events.ts`, Zod-validated
+via `eventType`), it runs three durable steps in order —
+
+1. **`authorize`** — `payCore.createPayment(...)`, keyed with
+   `stepIdempotencyKey(runId, "authorize")`. If the payment resolves with
+   `status !== "authorized"` (pay-core's 201-with-`status:"failed"` decline
+   case — see "Talking to pay-core" above), the function fails cleanly via
+   `NonRetriableError` and `capture` is never attempted; there is nothing to
+   compensate, since authorize never actually succeeded.
+2. **`capture`** — `payCore.capturePayment(...)`, keyed with
+   `stepIdempotencyKey(runId, "capture")` (a DIFFERENT key from `authorize`'s
+   — see "Two derivations, one input" below).
+3. **`post-ledger`** — builds a `PostingGroup.forCapture(...)` and calls
+   `ledger.post(...)`, keyed with `stepOperationId(runId, "post-ledger")`
+   (NOT `stepIdempotencyKey` — again, see below).
+
+Each `step.run(...)`'s catch block calls `rethrowForInngest` (`src/workflow/inngest-errors.ts`),
+which runs `decideRetry` and translates the decision into `RetryAfterError`
+(retry) or `NonRetriableError` (terminal/exhausted) — **this must happen
+INSIDE the `step.run` callback, never in the surrounding handler**: Inngest
+does not rethrow the original error object to the outer handler, so
+`error instanceof PayCoreClientError` only holds true inside the callback
+(see `rethrowForInngest`'s own doc comment, and ADR-0008).
+
+This step is happy-path only, on purpose: a terminal failure or exhausted
+retries fails the Inngest function cleanly. No compensation/saga/reversal
+logic exists yet — that's step 7.
+
+**Constructing it — real deps vs in-memory/test deps.** `createPaymentExecuteFunction`
+takes `{ inngest, payCore, ledger, retry? }` as a plain object, not
+constructed internally, specifically so callers can swap implementations
+without touching this file:
+
+```ts
+// Real deps (once step 8 adds main.ts / an inngest serve() endpoint):
+import { createInngestClient } from "@apo/durable-ledger"; // src/adapters/inngest/client.ts
+import { HttpPayCoreClient } from "@apo/durable-ledger"; // src/adapters/http/pay-core-client.ts
+import { PgLedgerRepository } from "@apo/durable-ledger"; // src/adapters/persistence/drizzle/pg-ledger-repository.ts
+
+const fn = createPaymentExecuteFunction({
+  inngest: createInngestClient({ isDev: true }),
+  payCore: new HttpPayCoreClient({ baseUrl: "http://localhost:3000" }),
+  ledger: new PgLedgerRepository(db),
+});
+```
+
+```ts
+// Test / local-demo deps — no I/O, no Docker, no dev server:
+import { InMemoryLedgerRepository } from "@apo/durable-ledger"; // src/adapters/memory/in-memory-ledger-repository.ts
+import { FakePayCoreClient } from "./fake-pay-core-client.js"; // test-only, not exported
+
+const fn = createPaymentExecuteFunction({
+  inngest: new Inngest({ id: "test" }),
+  payCore: new FakePayCoreClient(),
+  ledger: new InMemoryLedgerRepository(),
+});
+```
+
+`payment-execute.test.ts` drives the second shape through `@inngest/test`'s
+`InngestTestEngine` — no Docker, no real Inngest server. **This package has
+no `main.ts`/dev-server entrypoint and no `inngest serve()` HTTP endpoint
+yet** (step 8's concern) — there is currently no way to actually run
+`payment.execute` against a live local Inngest dev server; it is fully
+exercised today only in-process, via the test engine.
+
+**Two derivations, one input: `stepIdempotencyKey` vs `stepOperationId`.**
+Both take `(runId, stepName)` and are deterministic (same input -> same
+output, so a retried step reproduces the same value), but they are NOT
+interchangeable:
+
+- `stepIdempotencyKey(runId, stepName)` (`src/workflow/idempotency-key.ts`)
+  returns a 64-char sha256 hex string, sent to pay-core as the
+  `Idempotency-Key` header.
+- `stepOperationId(runId, stepName)` (`src/workflow/operation-id.ts`)
+  returns a deterministic RFC-9562 v8 UUID, used as `PostingGroup`'s
+  `operationId`.
+
+The reason a second derivation exists at all: `PostingGroup.create`
+(`src/domain/entry.ts`) requires `operationId` to be UUID-shaped
+(`assertUUID`'s regex) — a 64-char sha256 hex string fails that check
+outright. Passing one where the other is required either throws or silently
+posts under the wrong identity, so `payment-execute.ts` never substitutes
+one for the other, and `operation-id.test.ts` pins
+`stepOperationId(...) !== stepIdempotencyKey(...)` directly so this doesn't
+regress silently.
+
+**Known limitation: `RetryAfterError`'s whole-second quantization.**
+`decideRetry`'s `delayMs` is a millisecond value with sub-second precision
+(equal-jitter backoff, see "Retrying pay-core calls" above), but Inngest's
+own `RetryAfterError(message, retryAfter)` (confirmed against
+`inngest@4.20.0`) converts its `retryAfter` argument to
+`Math.ceil(ms / 1000)` whole seconds before handing it to Inngest's retry
+scheduler. `rethrowForInngest` passes `decision.delayMs` straight through —
+there is no workaround here, sub-second backoff precision is simply not
+representable on Inngest's actual retry-delay API, and this is the same
+"pay-core's own `Retry-After` header rounds up to whole seconds" rounding
+this package's `retryAfterMsOf`/`backoffDelayMs` already contend with (see
+"Retrying pay-core calls" above) — one more place the same rounding shows
+up, not a new problem.
+
+**Known limitation: the `runId`-seeded idempotency key under Inngest
+Replay.** `stepIdempotencyKey`/`stepOperationId` are deterministic functions
+of `runId`, per spec §2/§4.2's literal formula — kept as specified even
+though it has a real, understood interaction with Inngest's Replay feature:
+replaying a run assigns it a NEW `runId` (that's what makes it a distinct
+run in Inngest's UI/API), which means a replayed `authorize`/`capture` step
+computes a DIFFERENT `Idempotency-Key` than the original run used — pay-core
+sees an unrecognized key and performs a genuine SECOND effect (a second
+authorize/capture), not a replay of the first one's stored result. This is
+a spec-mandated, accepted limitation of the current formula, not an
+oversight; closing it (e.g. seeding the key from something stable across a
+Replay, such as the triggering event's own id) is out of scope for this
+step. Separately — and this is a property of `@inngest/test`, not of
+production Inngest — reusing the SAME `runId` across two separate
+`InngestTestEngine` instances (simulating "the same run happening twice")
+correctly produces two independent `post-ledger` invocations with a stable
+`operationId`, but reusing the same `InngestTestEngine` *instance* for two
+`.execute()` calls does not: its own `mockHandlerCache` persists across
+calls and can mask a step's second real invocation behind a stale cached
+result. `payment-execute.test.ts`'s idempotent-re-execution test constructs
+a fresh `InngestTestEngine` per run for exactly this reason.
 
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
@@ -301,8 +430,9 @@ the full rationale.
 - [x] Atomic multi-entry posting with a real DB transaction
 - [x] `pay-core` HTTP client + deterministic `Idempotency-Key`
 - [x] `decideRetry`/`isRetryable` retry policy (pure — no loop; Inngest owns
-      that in step 6, see ADR-0007)
-- [ ] `payment.execute` Inngest workflow (happy path + retries)
+      the actual retry loop, see ADR-0007)
+- [x] `payment.execute` Inngest workflow (happy path + retries, no
+      compensations yet — see ADR-0008)
 - [ ] Sagas + reversal postings (compensations)
 - [ ] Hono HTTP layer
 - [ ] Dockerfile + CI
