@@ -16,14 +16,17 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 1 of 9
+## Status: step 2 of 9
 
-This package currently contains **only the double-entry ledger domain
-model** — step 1 of the spec's own implementation order (§13):
+This package currently contains the double-entry ledger domain model plus
+the Postgres schema and migration plumbing for `ledger_entries` — steps 1-2
+of the spec's own implementation order (§13):
 
-1. **`src/domain/` (this step)** — `Money`, `LedgerAccount`, `LedgerEntry`,
+1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
-2. Postgres schema (`ledger_entries`, `workflow_runs`) via Drizzle.
+2. **Postgres schema (`ledger_entries`) via Drizzle (this step)** — its own
+   `ledger` Postgres schema, append-only via a `BEFORE UPDATE OR DELETE`
+   trigger. No repository/port implementation yet — that's step 3.
 3. `posting.ts` — atomic, transactional posting of a group of entries.
 4. A typed `pay-core` HTTP client with deterministic `Idempotency-Key`
    generation.
@@ -35,8 +38,8 @@ model** — step 1 of the spec's own implementation order (§13):
 8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
 9. Tests land alongside each step above.
 
-None of steps 2–9 exist yet in this package — no Postgres, no Inngest, no
-HTTP, no saga/compensation logic.
+None of steps 3–9 exist yet in this package — no repository/port
+implementation, no Inngest, no HTTP, no saga/compensation logic.
 
 ## The domain model
 
@@ -99,11 +102,35 @@ pnpm --filter @apo/durable-ledger lint
 
 Requires Node 24+ and pnpm.
 
+### Running the integration tests
+
+```bash
+docker compose up -d                                    # from the monorepo root; postgres:17-alpine on :5433
+DATABASE_URL=postgres://apo:apo@localhost:5433/apo pnpm --filter @apo/durable-ledger db:migrate
+
+pnpm --filter @apo/durable-ledger test:integration       # real-Postgres suites (*.integration.test.ts)
+```
+
+`pnpm --filter @apo/durable-ledger test` (no flags) never touches Postgres —
+`vitest.config.ts` excludes `*.integration.test.ts` — so the default test
+run stays green without Docker. `test:integration` defaults
+`TEST_DATABASE_URL` to the `apo_test` database above if unset, and fails
+loudly (not silently skips) if Postgres isn't reachable.
+
+This package's tables live in their own `ledger` Postgres schema, not
+`public`, even though they share one Postgres instance with `pay-core`
+(`docker-compose.yml`): namespace isolation, so `ledger_entries` can never
+collide with one of pay-core's tables, and migration-journal isolation, so
+applying this package's migrations (tracked at
+`ledger.__drizzle_migrations`) can never affect pay-core's own migration
+journal or vice versa. See `src/adapters/persistence/drizzle/schema.ts` for
+the full rationale.
+
 ## Roadmap
 
 - [x] Domain: `Money`, `LedgerAccount`, `LedgerEntry`, `PostingGroup`,
       balance/residual projections
-- [ ] Postgres schema + Drizzle adapters for `ledger_entries`
+- [x] Postgres schema (`ledger_entries`, append-only, own `ledger` schema)
 - [ ] Atomic multi-entry posting with a real DB transaction
 - [ ] `pay-core` HTTP client + deterministic `Idempotency-Key`
 - [ ] `isRetryable` retry policy
