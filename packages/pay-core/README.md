@@ -42,10 +42,23 @@ src/
     memory/    In-memory repository + idempotency store (tests only)
     persistence/drizzle/  Postgres repository + idempotency store (schema, migrations, adapters)
     http/      Hono routes, Zod schemas, error mapper
-  composition-root.ts   Wires the Postgres adapters + use-cases into `createPayCore(...)`
+  composition-root.ts   Wires use-cases + adapters: `createPayCore(...)` (Postgres) and
+                         `createInMemoryPayCore(...)` (tests/demos, no DB)
+  config.ts    Zod-validated env config for the runnable service, fail-fast at boot
+  main.ts      Process entrypoint: config → migrate → wire → serve → graceful shutdown
 ```
 
 See [ADR-0002](../../docs/adr/0002-ports-and-adapters.md).
+
+**Why ports, not "just import the driver":** every use-case in `src/app/`
+depends on `PaymentRepository`/`IdempotencyStore`/`PaymentProvider` —
+interfaces, not `pg` or a PSP SDK. That buys two things concretely, not
+abstractly: the entire domain and use-case test suite runs against in-memory
+adapters in milliseconds with no Docker, no network, no mocking framework —
+and swapping the in-memory repository for the real Postgres one (or the mock
+PSP for the simulator, or eventually a real processor) touches only
+`src/adapters/` and `composition-root.ts`. Nothing in `src/domain/` or
+`src/app/` has ever needed to change for any of those swaps to happen.
 
 ### Payment lifecycle
 
@@ -56,6 +69,23 @@ created ──authorize──▶ authorized ──capture──▶ captured ─�
 ```
 
 We use `cancel`/`canceled` (as in Stripe), not the legacy "void".
+
+The state machine is hand-written on `Payment` (`src/domain/payment.ts`) —
+not a library (see [Considered and rejected](#considered-and-rejected) for
+why not XState). Each transition method (`authorize`/`capture`/`refund`/
+`cancel`/`fail`) guards its own preconditions explicitly (current status,
+a shared `TERMINAL` set checked via `assertNotTerminal`) and throws a typed
+`IllegalStateTransitionError` rather than silently no-op'ing or coercing;
+terminal states (`refunded`/`failed`/`canceled`) have no outgoing
+transitions at all. The domain event mapping that *does* use the
+compiler for exhaustiveness lives one layer over, in the Postgres
+adapter's event→payload mapper and the simulator's directive encoder
+(`src/adapters/persistence/drizzle/mappers.ts`,
+`src/adapters/simulator/directives.ts`) — both switch on a discriminated
+union and assign the unreachable `default` case to a `const _exhaustive:
+never`, so adding a new event type or simulator outcome without updating
+every place that handles it is a build failure there, even though the
+state machine itself is guard-clause style rather than a switch.
 
 ## Correctness properties
 
@@ -80,10 +110,11 @@ abstract `ProviderError` (`src/ports/payment-provider.ts`):
 - **`ProviderDeclinedError`** — the provider looked at the request and said
   no (insufficient funds, fraud, expired card, …). `retryable = false`.
   Retrying the identical request cannot change the outcome. Maps to
-  HTTP `402` in the (roadmap) HTTP layer.
+  HTTP `402` (`src/adapters/http/error-mapper.ts`).
 - **`ProviderUnavailableError`** — the provider couldn't answer (network
   error, 5xx, timeout). `retryable = true`. The request may succeed if
-  retried. Maps to HTTP `503`.
+  retried. Maps to HTTP `503`, with a `Retry-After` header when the error
+  carries a hint.
 
 This split is not cosmetic: it's the contract the future `durable-ledger`
 package's retry policy is built on — it retries `ProviderUnavailableError` and
@@ -217,6 +248,47 @@ no advisory lock around them, so running more than one container against the
 same database at boot could race; that's fine at one container, but would
 need a dedicated one-shot migrate job if this ever scales out to multiple
 replicas.
+
+## Considered and rejected
+
+Each of these was a live option; the point of writing down *why not* is
+that the rejection was a decision, not an oversight.
+
+- **Express.** Works, but as a portfolio signal it's the default everyone
+  already reaches for — it demonstrates nothing about how you structure a
+  service, only that you can wire middleware.
+- **NestJS.** Nest's DI container and decorator layer add a layer of
+  indirection that *hides* the architecture instead of expressing it — for
+  a service this size, the hexagon (ports/adapters/use-cases,
+  [ADR-0002](../../docs/adr/0002-ports-and-adapters.md)) already gives the
+  same testability and swappability Nest's modules would, with the wiring
+  visible in `composition-root.ts` instead of behind decorators.
+- **Prisma.** Money code benefits from SQL you can read and reason about —
+  the exact query behind an optimistic-lock `UPDATE ... WHERE version = $2`
+  or a `(key, operation)` unique-constraint insert matters for the argument
+  this repo is making. [Drizzle](https://orm.drizzle.team/) stays close to
+  SQL and typed; Prisma's query engine and migration DSL trade some of that
+  control for convenience this repo doesn't need.
+- **XState.** A real FSM library buys more than this state machine needs
+  (parallel/hierarchical states, actors) at the cost of another dependency
+  and DSL between the reader and the actual transition logic. Seven states
+  and a handful of guarded transitions read fine as plain methods on
+  `Payment` — see [Payment lifecycle](#payment-lifecycle) above.
+- **A dispatching transactional outbox.** `PaymentRepository.save` already
+  gets the *reliable-write* half of an outbox for free (aggregate + domain
+  events in one DB transaction). The *delivery* half — a poller relaying
+  outbox rows to subscribers — is deliberately not built here: in this
+  topology, Inngest fills that role in the (future) `durable-ledger` repo,
+  so a dispatcher here would be a second mechanism doing the same job. See
+  [ADR-0003](../../docs/adr/0003-idempotency-and-outbox.md).
+- **Multi-capture** (`captured → captured`, capturing a second time to top
+  up an earlier partial capture). Real acquirers support it, but it adds a
+  second axis of partial-amount bookkeeping to the state machine for no
+  narrative benefit here — partial capture is supported (you can capture
+  less than the full authorization), it's just a single, final capture.
+- **Testcontainers**, in favor of a plain `docker-compose.yml` Postgres for
+  both local dev and CI — see [Persistence & concurrency](#persistence--concurrency)
+  above for the tradeoff.
 
 ## Roadmap
 
