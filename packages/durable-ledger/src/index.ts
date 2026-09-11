@@ -36,3 +36,4 @@ export * from "./adapters/http/pay-core-client.js";
 
 // Workflow
 export * from "./workflow/idempotency-key.js";
+export * from "./workflow/retry-policy.js";

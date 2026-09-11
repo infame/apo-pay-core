@@ -16,13 +16,14 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 4 of 9
+## Status: step 5 of 9
 
 This package currently contains the double-entry ledger domain model, the
 Postgres schema and migration plumbing for `ledger_entries`, the
-`LedgerRepository` port + Postgres adapter for atomic, idempotent posting,
-and a typed `pay-core` HTTP client with deterministic `Idempotency-Key`
-generation — steps 1-4 of the spec's own implementation order (§13):
+`LedgerRepository` port + Postgres adapter for atomic, idempotent posting, a
+typed `pay-core` HTTP client with deterministic `Idempotency-Key` generation,
+and a pure retry-decision policy — steps 1-5 of the spec's own implementation
+order (§13):
 
 1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
@@ -32,10 +33,12 @@ generation — steps 1-4 of the spec's own implementation order (§13):
    posting of a `PostingGroup`, plus the read paths
    (`findByOperationId`/`findByPaymentId`/`findByAccount`/`getBalance`). See
    "Posting & idempotency" below.
-4. **`HttpPayCoreClient` (this step)** — a typed HTTP client for `pay-core`'s
-   five routes, deterministic `Idempotency-Key` generation, and error
+4. **`HttpPayCoreClient`** — a typed HTTP client for `pay-core`'s five
+   routes, deterministic `Idempotency-Key` generation, and error
    classification. See "Talking to pay-core" below.
-5. `isRetryable(error)` — the 503-retry / 402-terminal classification.
+5. **`decideRetry`/`isRetryable` (this step)** — a pure retry-decision policy
+   over the error classification from step 4: retry or not, and after how
+   long. See "Retrying pay-core calls" below.
 6. `payment.execute` workflow on Inngest (happy path + retries, no
    compensations yet).
 7. Sagas: a hand-rolled step registry + compensation unwind, plus ledger
@@ -43,8 +46,8 @@ generation — steps 1-4 of the spec's own implementation order (§13):
 8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
 9. Tests land alongside each step above.
 
-None of steps 5–9 exist yet in this package — no retry policy, no Inngest,
-no HTTP layer, no saga/compensation logic, no composition root.
+None of steps 6–9 exist yet in this package — no Inngest, no HTTP layer, no
+saga/compensation logic, no composition root.
 
 ## The domain model
 
@@ -183,6 +186,67 @@ authorized with the provider before the response was lost. Closing that gap
 `pay-core` itself, not something this HTTP client can paper over, and is
 recorded here so it isn't silently assumed away.
 
+## Retrying pay-core calls
+
+`decideRetry(error, attempt, options?)` (`src/workflow/retry-policy.ts`) is a
+**pure decision function**: given a failed call's error and how many attempts
+have already happened, it answers "retry or not, and after how long" — it
+does not sleep, loop, or perform the retry itself.
+
+**Formula** (equal jitter, server hint as a floor):
+
+```
+exp      = min(baseDelayMs * backoffMultiplier ** (attempt - 1), maxDelayMs)
+jittered = exp / 2 + rng() * (exp / 2)        // ∈ [exp/2, exp)
+delayMs  = min(round(max(jittered, hint)), maxDelayMs)
+```
+
+With `DEFAULT_RETRY_POLICY` (`maxAttempts: 4, baseDelayMs: 500,
+backoffMultiplier: 2, maxDelayMs: 30_000`):
+
+| Attempt | Delay range (no server hint) |
+|---|---|
+| 1 | 250 – 500ms |
+| 2 | 500ms – 1s |
+| 3 | 1 – 2s |
+| 4th failure | `attempts_exhausted` — no attempt 5 |
+
+`maxAttempts: 4` isn't arbitrary: the simulator's `sim.fail_then_succeed`
+directive defaults to 1 failure (`DEFAULT_FAILURES` in
+`packages/pay-core/src/adapters/simulator/directives.ts`), so a default
+policy comfortably absorbs the demo's own flakiness while keeping the
+worst-case wall-clock under ~4 seconds absent a server hint.
+
+A `PayCoreUnavailableError` carrying `retryAfterMs` (from pay-core's
+`Retry-After` header) acts as a **floor** via `max(jittered, hint)` — it can
+only extend a wait, never shorten one that's already escalated, and a
+sub-second hint (which serializes to the header value `"0"`, since pay-core
+emits `Math.ceil(ms / 1000)`) safely falls through to normal backoff instead
+of forcing a hot loop.
+
+An error that isn't a `PayCoreClientError` at all (a `LedgerError`, a
+`PostingConflictError`, a plain bug) is never retried —
+`reason: "unclassified_error"` — because every error `HttpPayCoreClient` can
+actually throw is already funneled through `payCoreErrorFor` into a
+`PayCoreClientError`; anything else is a different kind of failure that
+won't un-happen on a retry.
+
+**Inngest owns the retry loop here — do not add a `withRetry` helper.** This
+package deliberately ships no attempt loop. Step 6's Inngest workflow calls
+`decideRetry` inside a `step.run(...)`, and Inngest's own step-retry
+mechanism (durable across a process crash, unlike an in-process
+`setTimeout`) does the actual waiting and re-invoking — rethrow the server's
+hint as Inngest's own retry-delay signal on `shouldRetry: true`, and a
+non-retriable signal otherwise, routing `terminal_error`/`unclassified_error`
+to compensation and `attempts_exhausted` to `needs_review` (see
+[ADR-0007](../../docs/adr/0007-inngest-owns-the-retry-loop.md) for the full
+reasoning, including the retry-amplification math a nested loop would cause).
+Step 6 should configure Inngest's own `retries` option as
+`DEFAULT_RETRY_POLICY.maxAttempts - 1` so the two ceilings stay pinned
+together — **unverified against an actual installed `inngest` version**; step
+6 must confirm the real API (e.g. whether `NonRetriableError`/
+`RetryAfterError` exist under those names/signatures) before relying on this.
+
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
 `src/domain/money.ts` is a deliberate copy of `pay-core`'s `Money`, not
@@ -236,7 +300,8 @@ the full rationale.
 - [x] Postgres schema (`ledger_entries`, append-only, own `ledger` schema)
 - [x] Atomic multi-entry posting with a real DB transaction
 - [x] `pay-core` HTTP client + deterministic `Idempotency-Key`
-- [ ] `isRetryable` retry policy
+- [x] `decideRetry`/`isRetryable` retry policy (pure — no loop; Inngest owns
+      that in step 6, see ADR-0007)
 - [ ] `payment.execute` Inngest workflow (happy path + retries)
 - [ ] Sagas + reversal postings (compensations)
 - [ ] Hono HTTP layer
