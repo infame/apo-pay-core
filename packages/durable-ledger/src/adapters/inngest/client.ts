@@ -27,6 +27,15 @@ export interface InngestClientOptions {
   readonly isDev?: boolean;
   readonly baseUrl?: string;
   readonly eventKey?: string;
+  /**
+   * Required in cloud mode to authenticate registration/execution requests
+   * against Inngest Cloud (see the `isDev` doc comment above for what
+   * happens without one). Not needed in dev mode. Also consumed directly by
+   * `InngestWorkflowRuns` (`./inngest-workflow-runs.js`) to authenticate its
+   * own REST calls against Inngest's API — that's a separate use, not
+   * plumbed through this client.
+   */
+  readonly signingKey?: string;
 }
 
 /**
@@ -43,5 +52,6 @@ export function createInngestClient(opts?: InngestClientOptions): Inngest {
     ...(opts?.isDev !== undefined ? { isDev: opts.isDev } : {}),
     ...(opts?.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
     ...(opts?.eventKey !== undefined ? { eventKey: opts.eventKey } : {}),
+    ...(opts?.signingKey !== undefined ? { signingKey: opts.signingKey } : {}),
   });
 }

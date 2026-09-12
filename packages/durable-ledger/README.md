@@ -16,15 +16,16 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 7 of 9
+## Status: step 8 of 9
 
 This package currently contains the double-entry ledger domain model
 (including the reversal factory), the Postgres schema and migration plumbing
 for `ledger_entries`, the `LedgerRepository` port + Postgres adapter (plus an
 in-memory adapter) for atomic, idempotent posting, a typed `pay-core` HTTP
 client with deterministic `Idempotency-Key` generation, a pure
-retry-decision policy, and the `payment.execute` Inngest workflow with
-compensations — steps 1-7 of the spec's own implementation order (§13):
+retry-decision policy, the `payment.execute` Inngest workflow with
+compensations, and a thin Hono HTTP layer + composition root + `main.ts` —
+steps 1-8 of the spec's own implementation order (§13):
 
 1. **`src/domain/`** — `Money`, `LedgerAccount`, `LedgerEntry`,
    `PostingGroup`, and the balance/residual projections. No I/O.
@@ -46,13 +47,13 @@ compensations — steps 1-7 of the spec's own implementation order (§13):
    cancels/refunds a `pay-core` payment and reverses its ledger posting when
    a later step fails terminally, plus `PostingGroup.reversalOf` (deferred
    since step 1). See "Compensations (sagas)" below.
-8. A thin Hono HTTP layer (`/workflows/*`, `/ledger/*`).
+8. **A thin Hono HTTP layer (this step)** — `createLedgerApp` (trigger,
+   status, and ledger-read routes), a composition root, Zod-validated
+   config, and `main.ts`. See "HTTP surface" and "Running the service"
+   below.
 9. Tests land alongside each step above.
 
-Neither step 8 nor 9 exists yet in this package — no HTTP layer, no
-composition root/`main.ts`, so `payment.execute` cannot yet be driven against
-a live Inngest dev server end to end; it's fully testable in-process today
-(see "Running the workflow").
+Step 9 (a `Dockerfile` and CI) does not exist yet in this package.
 
 ## The domain model
 
@@ -309,7 +310,8 @@ constructed internally, specifically so callers can swap implementations
 without touching this file:
 
 ```ts
-// Real deps (once step 8 adds main.ts / an inngest serve() endpoint):
+// Real deps — this is what src/composition-root.ts's createDurableLedger
+// actually wires; see "Running the service" below to run it for real:
 import { createInngestClient } from "@apo/durable-ledger"; // src/adapters/inngest/client.ts
 import { HttpPayCoreClient } from "@apo/durable-ledger"; // src/adapters/http/pay-core-client.ts
 import { PgLedgerRepository } from "@apo/durable-ledger"; // src/adapters/persistence/drizzle/pg-ledger-repository.ts
@@ -334,11 +336,12 @@ const fn = createPaymentExecuteFunction({
 ```
 
 `payment-execute.test.ts` drives the second shape through `@inngest/test`'s
-`InngestTestEngine` — no Docker, no real Inngest server. **This package has
-no `main.ts`/dev-server entrypoint and no `inngest serve()` HTTP endpoint
-yet** (step 8's concern) — there is currently no way to actually run
-`payment.execute` against a live local Inngest dev server; it is fully
-exercised today only in-process, via the test engine.
+`InngestTestEngine` — no Docker, no real Inngest server; that stays true for
+this file's own tests. **This package now also has a real `main.ts` and an
+`inngest/hono` `serve()` endpoint** (this step — see "Running the service"
+below), so `payment.execute` can additionally be driven end-to-end against a
+live local Inngest dev server, not just exercised in-process via the test
+engine.
 
 **Two derivations, one input: `stepIdempotencyKey` vs `stepOperationId`.**
 Both take `(runId, stepName)` and are deterministic (same input -> same
@@ -492,6 +495,82 @@ never see this split — only `payment-execute-compensation.test.ts`
 (`FakeWorkflowStep`) and `payment-execute.test.ts` (`InngestTestEngine`, for
 the happy path and pre-effect failures) drive it differently.
 
+## HTTP surface
+
+`createLedgerApp(deps)` (`src/adapters/http/app.ts`) builds the driving HTTP
+adapter — a Hono app over `LedgerRepository` and a new `WorkflowRuns` port
+(`src/ports/workflow-runs.ts`). No auth, matching `pay-core`'s own scope.
+
+| Route | What it does |
+|---|---|
+| `POST /workflows/payment` | Validates the body against `paymentExecuteRequestedSchema`, calls `WorkflowRuns.startPaymentExecute` (→ `inngest.send(...)`), returns `202 { eventId, statusUrl }`. |
+| `GET /workflows/:eventId` | Returns a `WorkflowRunSnapshot` — `status` (`queued`/`running`/`completed`/`failed`/`cancelled`), `runId`, timestamps, and `needsReview`/`failureMessage`. `404` if the engine doesn't recognize the id. |
+| `GET /ledger/entries?paymentId=…` or `?operationId=…` | Exactly one of the two query params, enforced by a Zod `.refine`. An empty result is `200 { entries: [] }`, never `404`. |
+| `GET /ledger/accounts/:account/balance?currency=EUR` | `:account` is `LedgerAccount`'s serialized form (`merchant:42`, `acquirer_clearing`), percent-decoded then parsed. |
+| `GET /healthz` | `200 { status: "ok" }`. |
+
+Errors follow the same envelope as `pay-core`: `{ error: { code, message, details? } }`
+(`src/adapters/http/server-error-mapper.ts`). One deliberate divergence from
+`pay-core`'s own convention: `InvalidAccountError`/`InvalidMoneyError`/`CurrencyMismatchError`
+map to **400**, not 422, here — in this HTTP layer they only ever arise from
+parsing a request path/query parameter (a malformed request), never from a
+rejected state transition, so 400 is the honest status.
+
+**Triggering a run does not hand back a caller-chosen id.** `startPaymentExecute`
+resolves with Inngest's own server-assigned event id (a ULID) — there is no
+SDK-level way to look a run up by anything else, and a self-minted
+correlation id is rejected outright by Inngest's own API (verified: it's
+strictly ULID-shaped). A caller that loses the `202` response's `eventId`
+cannot re-find that run. Accepted limitation for a portfolio-scale demo —
+see [ADR-0010](../../docs/adr/0010-run-status-from-inngest-not-a-workflow-runs-table.md)
+for the reasoning behind not building a `workflow_runs` table to fix this.
+
+**`GET /workflows/:eventId` reads run status live from Inngest's own REST
+API**, not from any table this package owns — `InngestWorkflowRuns`
+(`src/adapters/inngest/inngest-workflow-runs.ts`) makes two sequential calls
+(`/v1/events/:id/runs` to resolve the run id, then `/v1/runs/:id` for the
+authoritative status — the second call's answer always wins over the
+first's, which can report a stale status) and parses both through the
+*response envelope's* own `status` field rather than the HTTP status code,
+since Inngest's dev server answers `200` even for its own errors. `needsReview`
+is derived by checking a failed run's output for the literal
+`NEEDS_REVIEW_MARKER` string exported from `src/workflow/compensation.ts` —
+the dead-letter signal [ADR-0009](../../docs/adr/0009-compensation-routing-and-the-workflow-step-seam.md)
+designed is readable through this endpoint verbatim, with no extra plumbing.
+See ADR-0010 for the full reasoning and the verified API quirks.
+
+## Running the service
+
+```bash
+docker compose up -d                          # from the monorepo root; postgres:17-alpine on :5433
+npx inngest-cli@latest dev                     # a local Inngest dev server on :8288
+
+DATABASE_URL=postgres://apo:apo@localhost:5433/apo \
+PAY_CORE_URL=http://localhost:3000 \
+pnpm --filter @apo/durable-ledger start        # after `pnpm --filter @apo/durable-ledger build`
+```
+
+`main.ts` loads `config.ts`'s Zod-validated `AppConfig` from the environment,
+conditionally applies pending migrations (`MIGRATE_ON_BOOT`, default `true`),
+builds the service via `createDurableLedger(...)` (`src/composition-root.ts`),
+and serves it with `@hono/node-server`, with the same SIGTERM/SIGINT
+graceful-shutdown-then-force-exit pattern as `pay-core`'s `main.ts`.
+
+Notable env vars beyond `DATABASE_URL`/`PAY_CORE_URL`/`PORT`/`HOST`: `INNGEST_DEV`
+(default `true` — talks to a local dev server with no keys required);
+`INNGEST_BASE_URL` (default `http://localhost:8288`); `INNGEST_SERVE_PATH`
+(default `/api/inngest` — where the Inngest dev server discovers and calls
+this service); `INNGEST_SIGNING_KEY`/`INNGEST_EVENT_KEY` (required, and
+validated at boot via a `superRefine`, the moment `INNGEST_DEV=false` — i.e.
+Inngest Cloud). `createDurableLedger` builds `createPaymentExecuteFunction(...)`
+and passes it straight into `inngest/hono`'s `serve({ client, functions })`
+inline, in one expression — never through an intermediately-annotated
+variable, the same defensive shape `payment-execute.ts` uses, since that's
+the exact neighborhood where [ADR-0008](../../docs/adr/0008-inngest-v4-and-workflow-wiring.md)'s
+type-inference trap previously showed up (this step's own investigation
+found `inngest/hono`'s looser typing likely avoids it here, but the shape
+costs nothing to keep).
+
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
 `src/domain/money.ts` is a deliberate copy of `pay-core`'s `Money`, not
@@ -551,5 +630,6 @@ the full rationale.
       compensations yet — see ADR-0008)
 - [x] Sagas + reversal postings (compensations) — hand-rolled decision table
       (`planUnwind`/`runUnwind`), `PostingGroup.reversalOf`
-- [ ] Hono HTTP layer
+- [x] Hono HTTP layer — trigger/status/ledger-read routes, composition root,
+      `main.ts`; run status read live from Inngest's own API (ADR-0010)
 - [ ] Dockerfile + CI
