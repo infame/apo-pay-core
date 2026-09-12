@@ -1,5 +1,7 @@
 # @apo/durable-ledger
 
+[![CI](https://github.com/infame/autonomous-payment-orchestrator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/infame/autonomous-payment-orchestrator/actions/workflows/ci.yml)
+
 Durable execution and a double-entry ledger, one package
 (`packages/durable-ledger`) in the **APO** (Autonomous Payment Orchestrator)
 monorepo — a portfolio project. It sits alongside `@apo/pay-core`
@@ -16,7 +18,7 @@ moved. That boundary is intentional: this package durably orchestrates
 (`docs/todo/02-durable-ledger.md`, not in this repo); the sections that
 matter are summarised below.
 
-## Status: step 8 of 9
+## Status: step 9 of 9
 
 This package currently contains the double-entry ledger domain model
 (including the reversal factory), the Postgres schema and migration plumbing
@@ -53,7 +55,8 @@ steps 1-8 of the spec's own implementation order (§13):
    below.
 9. Tests land alongside each step above.
 
-Step 9 (a `Dockerfile` and CI) does not exist yet in this package.
+Step 9 (a `Dockerfile` and CI) is now done — see "Docker" under "Running the
+service" below and `.github/workflows/ci.yml`.
 
 ## The domain model
 
@@ -571,6 +574,27 @@ type-inference trap previously showed up (this step's own investigation
 found `inngest/hono`'s looser typing likely avoids it here, but the shape
 costs nothing to keep).
 
+### Docker
+
+```bash
+docker compose up -d --build      # from the monorepo root
+```
+
+This now starts all four services — `postgres`, `pay-core`, `inngest` (the
+Inngest dev server), and `durable-ledger` — and converges on its own,
+without a manual restart: the Inngest dev server polls
+`http://durable-ledger:3100/api/inngest` every few seconds until this
+service answers, rather than requiring it to already be up when `inngest`
+starts. The non-Docker instructions above remain the faster inner loop for
+local development.
+
+Two things worth knowing: the `inngest` service keeps its run history
+in-memory (no `--persist` volume, matching local `npx inngest-cli dev`
+behavior), so `docker compose down` discards it by design; and `/healthz`
+deliberately only checks this service's own liveness, not `pay-core`'s or
+Inngest's reachability — the same shallow contract as `pay-core`'s own
+`/healthz`.
+
 ## Why a duplicated `Money`, not shared with `@apo/pay-core`
 
 `src/domain/money.ts` is a deliberate copy of `pay-core`'s `Money`, not
@@ -632,4 +656,6 @@ the full rationale.
       (`planUnwind`/`runUnwind`), `PostingGroup.reversalOf`
 - [x] Hono HTTP layer — trigger/status/ledger-read routes, composition root,
       `main.ts`; run status read live from Inngest's own API (ADR-0010)
-- [ ] Dockerfile + CI
+- [x] Dockerfile + CI — the package's own `Dockerfile`, `docker-compose.yml`
+      wiring for a real Inngest dev server, and the monorepo CI workflow
+      (`.github/workflows/ci.yml`)
