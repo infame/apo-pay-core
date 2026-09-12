@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck / lint / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run test
+
+  integration:
+    name: integration tests (real Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: apo
+          POSTGRES_PASSWORD: apo
+          # Named apo_test, not apo: both packages' test:integration scripts
+          # default TEST_DATABASE_URL to .../apo_test, so creating it as the
+          # service's own database removes a separate CREATE DATABASE step.
+          POSTGRES_DB: apo_test
+        ports:
+          # 5433, not 5432 — matches both packages' test:integration default
+          # and docker-compose.yml's own port mapping, so no env override
+          # is needed here.
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U apo -d apo_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # No db:migrate step: each package's vitest.integration.config.ts
+      # globalSetup applies its own migrations before any suite runs.
+      - run: pnpm run test:integration
+
+  docker:
+    name: docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f packages/pay-core/Dockerfile -t apo/pay-core:ci .
+      - run: docker build -f packages/durable-ledger/Dockerfile -t apo/durable-ledger:ci .

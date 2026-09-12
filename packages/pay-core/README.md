@@ -1,5 +1,7 @@
 # @apo/pay-core
 
+[![CI](https://github.com/infame/autonomous-payment-orchestrator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/infame/autonomous-payment-orchestrator/actions/workflows/ci.yml)
+
 Deterministic payment core, one package (`packages/pay-core`) in the
 **APO** (Autonomous Payment Orchestrator, hence the `@apo/*` package scope)
 monorepo — a portfolio project. `durable-ledger`, `agent-orchestrator`,
@@ -302,4 +304,4 @@ that the rejection was a decision, not an oversight.
 - [x] Hono HTTP layer + Zod schemas + error mapper
 - [x] Integration tests against a real Postgres
 - [x] Dockerfile + `docker compose` runnable service
-- [ ] CI
+- [x] CI (GitHub Actions — see .github/workflows/ci.yml)

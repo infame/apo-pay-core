@@ -39,5 +39,64 @@ services:
       retries: 10
       start_period: 10s
 
+  inngest:
+    # The Inngest dev server (same engine `npx inngest-cli@latest dev` runs
+    # locally). No ENTRYPOINT on this image, so `command` repeats the binary.
+    image: inngest/inngest:v1.44.0
+    command:
+      [
+        "inngest",
+        "dev",
+        "--no-discovery",
+        "-u",
+        "http://durable-ledger:3100/api/inngest",
+      ]
+    ports:
+      # The dev dashboard — http://localhost:8288 to watch steps, retries,
+      # and compensations.
+      - "8288:8288"
+    init: true
+    healthcheck:
+      # This image ships no curl/wget/nc; bash's /dev/tcp is what's available
+      # for a TCP liveness probe.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8288"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  durable-ledger:
+    build:
+      context: .
+      dockerfile: packages/durable-ledger/Dockerfile
+    depends_on:
+      postgres:
+        # Load-bearing: MIGRATE_ON_BOOT defaults to true, and main.ts
+        # process.exit(1)s if migrations can't run.
+        condition: service_healthy
+      pay-core:
+        # Convenience ordering only — nothing at boot calls pay-core; it's
+        # needed at workflow-execution time, not startup.
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://apo:apo@postgres:5432/apo
+      PAY_CORE_URL: http://pay-core:3000
+      PORT: "3100"
+      INNGEST_DEV: "true"
+      INNGEST_BASE_URL: http://inngest:8288
+      # Redundant with config.ts's own default, set explicitly here so the
+      # coupling with the inngest service's `-u` flag above is visible in
+      # one file — if you change one, change the other.
+      INNGEST_SERVE_PATH: /api/inngest
+    ports:
+      - "3100:3100"
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 volumes:
   apo_postgres_data:

@@ -12,6 +12,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
+    "test:integration": "pnpm -r test:integration",
     "lint": "pnpm -r lint",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
